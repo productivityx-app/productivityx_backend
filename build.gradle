@@ -1,0 +1,72 @@
+plugins {
+    id 'java'
+    alias(libs.plugins.spring.boot)
+    alias(libs.plugins.spring.deps)
+    id "org.jetbrains.kotlin.plugin.spring" version '2.3.0'
+}
+
+group = 'com.productivityx'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.spring.io/milestone' }
+}
+
+dependencyManagement {
+    imports {
+        mavenBom("org.testcontainers:testcontainers-bom:${libs.versions.testcontainers.get()}")
+    }
+}
+
+dependencies {
+    implementation libs.spring.boot.starter.web
+    implementation libs.spring.boot.starter.security
+    implementation libs.spring.boot.starter.data.jpa
+    implementation libs.spring.boot.starter.websocket
+    implementation libs.spring.boot.starter.actuator
+    implementation libs.spring.boot.starter.validation
+    implementation "org.springframework.boot:spring-boot-starter-data-redis"
+
+    // Spring Retry — @Retryable on EmailService.send()
+    implementation libs.spring.retry
+    implementation libs.spring.boot.starter.aspectj
+
+    implementation libs.jjwt.api
+    runtimeOnly libs.jjwt.impl
+    runtimeOnly libs.jjwt.jackson
+
+    runtimeOnly libs.postgresql
+    implementation libs.flyway.core
+    implementation libs.flyway.database.postgresql
+
+    implementation libs.springdoc.openapi.starter
+
+    implementation libs.okhttp
+    implementation libs.okhttp.logging
+
+    implementation libs.lettuce.core
+
+    implementation "org.jetbrains.kotlin:kotlin-stdlib"
+
+    compileOnly libs.lombok
+    annotationProcessor libs.lombok
+
+    testCompileOnly libs.lombok
+    testAnnotationProcessor libs.lombok
+
+    testImplementation libs.spring.boot.starter.test
+    testImplementation libs.spring.security.test
+    testImplementation libs.testcontainers.junit
+    testImplementation libs.testcontainers.postgresql
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
