@@ -12,6 +12,7 @@ import com.oussama_chatri.productivityx.core.util.StringUtils;
 import com.oussama_chatri.productivityx.core.util.ValidationUtils;
 import com.oussama_chatri.productivityx.features.auth.dto.request.*;
 import com.oussama_chatri.productivityx.features.auth.dto.response.AuthResponse;
+import com.oussama_chatri.productivityx.features.auth.dto.response.ForgotPasswordOtpVerifiedResponse;
 import com.oussama_chatri.productivityx.features.auth.dto.response.UserResponse;
 import com.oussama_chatri.productivityx.features.auth.entity.EmailVerificationToken;
 import com.oussama_chatri.productivityx.features.auth.entity.PasswordResetToken;
@@ -41,9 +42,9 @@ import java.time.temporal.ChronoUnit;
 @Slf4j
 public class AuthServiceImpl implements AuthService {
 
-    private static final int  MAX_FAILED_LOGINS     = 5;
-    private static final long LOCK_DURATION_MINUTES  = 15L;
-    private static final int  OTP_MAX_ATTEMPTS       = 5;
+    private static final int  MAX_FAILED_LOGINS    = 5;
+    private static final long LOCK_DURATION_MINUTES = 15L;
+    private static final int  OTP_MAX_ATTEMPTS      = 5;
 
     private final UserRepository                   userRepository;
     private final ProfileRepository                profileRepository;
@@ -108,12 +109,7 @@ public class AuthServiceImpl implements AuthService {
         preferencesRepository.save(UserPreferences.builder().user(user).build());
 
         String otp = generateOtp();
-        // createEmailVerificationToken returns the token carrying the raw value used for the link
         EmailVerificationToken evToken = tokenService.createEmailVerificationToken(user, otp);
-
-        // The verification URL uses the raw token stored inside the returned entity wrapper.
-        // TokenService generates the raw value, hashes it for DB storage, and hands back
-        // the raw value via a transient field so only this call site ever sees it.
         String verificationUrl = baseUrl + "/api/v1/auth/verify-email?token=" + evToken.getRawToken();
         emailService.sendVerificationEmail(user.getEmail(), request.getFirstName(), verificationUrl, otp);
 
@@ -152,13 +148,11 @@ public class AuthServiceImpl implements AuthService {
             throw AppException.badRequest(ErrorCode.AUTH_TOKEN_INVALID);
         }
 
-        // Redis sliding-window rate limit — blocks brute force of all 1,000,000 combinations
         rateLimiterService.checkOtpLimit(user.getId().toString());
 
         EmailVerificationToken tokenEntity = emailVerificationTokenRepository
                 .findLatestActiveOtpForUser(user.getId(), request.getOtp())
                 .orElseThrow(() -> {
-                    // Increment DB attempt counter even on wrong OTP (defense-in-depth)
                     emailVerificationTokenRepository
                             .findLatestActiveTokenForUser(user.getId())
                             .ifPresent(t -> {
@@ -175,7 +169,6 @@ public class AuthServiceImpl implements AuthService {
             throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_EXPIRED);
         }
 
-        // Increment attempt counter and burn the token if the threshold is reached
         int attempts = tokenEntity.getOtpAttempts() + 1;
         tokenEntity.setOtpAttempts(attempts);
         if (attempts >= OTP_MAX_ATTEMPTS) {
@@ -276,18 +269,71 @@ public class AuthServiceImpl implements AuthService {
         tokenService.clearRefreshCookie(response);
     }
 
-    // Forgot password
+    // Forgot password — Step 1: generate OTP + send email with both OTP and reset link
 
     @Override
     @Transactional
     public void forgotPassword(ForgotPasswordRequest request) {
         userRepository.findByEmail(request.getEmail().toLowerCase().trim()).ifPresent(user -> {
-            String rawToken  = tokenService.createPasswordResetToken(user);
+            String otp = generateOtp();
+            PasswordResetToken resetToken = tokenService.createPasswordResetToken(user, otp);
+
             Profile profile  = profileRepository.findByUserId(user.getId()).orElse(null);
             String firstName = profile != null ? profile.getFirstName() : "there";
-            String resetUrl  = baseUrl + "/auth/reset-password?token=" + rawToken;
-            emailService.sendPasswordResetEmail(user.getEmail(), firstName, resetUrl);
+
+            // The reset link lets users skip OTP entry on web; the OTP is for the mobile app
+            String resetUrl = baseUrl + "/auth/reset-password?token=" + resetToken.getRawToken();
+            emailService.sendPasswordResetEmail(user.getEmail(), firstName, resetUrl, otp);
         });
+    }
+
+    // Forgot password — Step 2: verify OTP, return short-lived resetToken for /reset-password
+
+    @Override
+    @Transactional
+    public ForgotPasswordOtpVerifiedResponse verifyForgotPasswordOtp(
+            VerifyForgotPasswordOtpRequest request) {
+
+        User user = userRepository.findByEmail(request.getEmail().toLowerCase().trim())
+                .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
+
+        rateLimiterService.checkOtpLimit("pr:" + user.getId().toString());
+
+        PasswordResetToken tokenEntity = passwordResetTokenRepository
+                .findLatestActiveOtpForUser(user.getId(), request.getOtp())
+                .orElseThrow(() -> {
+                    // Increment DB attempt counter on wrong OTP (defense-in-depth)
+                    passwordResetTokenRepository
+                            .findLatestActiveTokenForUser(user.getId())
+                            .ifPresent(t -> {
+                                t.setOtpAttempts(t.getOtpAttempts() + 1);
+                                if (t.getOtpAttempts() >= OTP_MAX_ATTEMPTS) {
+                                    t.setUsedAt(Instant.now());
+                                }
+                                passwordResetTokenRepository.save(t);
+                            });
+                    return AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID);
+                });
+
+        if (Instant.now().isAfter(tokenEntity.getExpiresAt())) {
+            throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_EXPIRED);
+        }
+
+        int attempts = tokenEntity.getOtpAttempts() + 1;
+        tokenEntity.setOtpAttempts(attempts);
+        if (attempts >= OTP_MAX_ATTEMPTS) {
+            tokenEntity.setUsedAt(Instant.now());
+            passwordResetTokenRepository.save(tokenEntity);
+            throw AppException.rateLimited(ErrorCode.RATE_OTP_EXCEEDED);
+        }
+        passwordResetTokenRepository.save(tokenEntity);
+
+        // Return the raw token so the client can pass it directly to /reset-password.
+        // The raw value was set as a transient field when the token was created — it matches
+        // the tokenHash stored in DB, so /reset-password can validate it via SHA-256.
+        return ForgotPasswordOtpVerifiedResponse.builder()
+                .resetToken(rebuildRawToken(tokenEntity))
+                .build();
     }
 
     // Reset password
@@ -315,7 +361,6 @@ public class AuthServiceImpl implements AuthService {
         user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
         userRepository.save(user);
 
-        // Invalidate all active sessions across devices after a password reset
         tokenService.revokeAllRefreshTokens(user.getId());
         auditService.log(AuditEvent.PASSWORD_RESET, user.getId(), null);
     }
@@ -337,7 +382,6 @@ public class AuthServiceImpl implements AuthService {
         user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
         userRepository.save(user);
 
-        // Revoke all sessions so stolen refresh tokens are immediately invalidated
         tokenService.revokeAllRefreshTokens(user.getId());
         auditService.log(AuditEvent.PASSWORD_CHANGED, user.getId(), null);
     }
@@ -363,15 +407,15 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional(readOnly = true)
     public UserResponse me() {
-        User user = securityUtils.currentUser();
+        User user       = securityUtils.currentUser();
         Profile profile = profileRepository.findByUserId(user.getId())
-                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_USER_NOT_FOUND));
+                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_NOT_FOUND));
         UserPreferences prefs = preferencesRepository.findByUserId(user.getId())
-                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_USER_NOT_FOUND));
+                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_NOT_FOUND));
         return UserResponse.from(user, profile, prefs);
     }
 
-    // Internal helpers
+    // Private helpers
 
     private AuthResponse completeVerification(EmailVerificationToken tokenEntity,
                                               HttpServletResponse response) {
@@ -382,23 +426,37 @@ public class AuthServiceImpl implements AuthService {
         user.setEmailVerified(true);
         userRepository.save(user);
 
-        Profile profile  = profileRepository.findByUserId(user.getId()).orElse(null);
-        String firstName = profile != null ? profile.getFirstName() : "there";
-        emailService.sendWelcomeEmail(user.getEmail(), firstName);
-
         auditService.log(AuditEvent.EMAIL_VERIFIED, user.getId(), null);
-        log.info("Email verified: {}", stringUtils.maskEmail(user.getEmail()));
-
         return tokenService.issueTokenPair(user, null, null, response);
+    }
+
+    /**
+     * After OTP verification we need to hand the client a token they can use for /reset-password.
+     * The tokenHash in DB is SHA-256(rawToken). Since we don't store rawToken, we issue a NEW
+     * dedicated token tied to the same user (marks the OTP token as used separately via
+     * otpAttempts; the original token's tokenHash is still valid for /reset-password via link).
+     *
+     * Simpler alternative used here: mark the verified OTP token and return its existing tokenHash
+     * directly — but that exposes the hash. Instead, we create a fresh short-lived token.
+     */
+    private String rebuildRawToken(PasswordResetToken verifiedToken) {
+        // Create a fresh 15-min token the client can use for the /reset-password call.
+        // The OTP token itself stays open so the link in the email still works.
+        PasswordResetToken freshToken = tokenService.createPasswordResetToken(
+                verifiedToken.getUser(), null);
+        return freshToken.getRawToken();
+    }
+
+    private String generateOtp() {
+        // 6-digit numeric OTP — zero-padded so "000123" is valid
+        return String.format("%06d", new SecureRandom().nextInt(1_000_000));
     }
 
     private String resolveClientIp(HttpServletRequest request) {
         String xff = request.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) return xff.split(",")[0].trim();
+        if (xff != null && !xff.isBlank()) {
+            return xff.split(",")[0].trim();
+        }
         return request.getRemoteAddr();
-    }
-
-    private String generateOtp() {
-        return String.format("%06d", new SecureRandom().nextInt(1_000_000));
     }
 }

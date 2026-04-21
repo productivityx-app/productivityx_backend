@@ -24,13 +24,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.UUID;
 
-/**
- * Owns the full lifecycle of all token types:
- * refresh tokens, email verification tokens, and password reset tokens.
- *
- * Email verification tokens expose the raw value via a transient field so
- * callers can embed it in the verification URL without ever seeing the hash.
- */
 @Service
 @RequiredArgsConstructor
 public class TokenService {
@@ -84,7 +77,6 @@ public class TokenService {
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
 
         if (token.getRevokedAt() != null) {
-            // Token reuse detected — revoke the entire family for this user
             refreshTokenRepository.revokeAllForUser(token.getUser().getId(), Instant.now());
             throw AppException.unauthorized(ErrorCode.AUTH_REFRESH_TOKEN_REVOKED);
         }
@@ -123,11 +115,6 @@ public class TokenService {
 
     // Email verification tokens
 
-    /**
-     * Creates and persists the verification token.
-     * The returned entity carries the raw (unhashed) token in a transient field
-     * so the caller can embed it in the magic-link URL. The hash is what is stored.
-     */
     @Transactional
     public EmailVerificationToken createEmailVerificationToken(User user, String otp) {
         String raw = generateSecureRandom();
@@ -139,28 +126,32 @@ public class TokenService {
                         .otpAttempts(0)
                         .expiresAt(Instant.now().plus(24, ChronoUnit.HOURS))
                         .build());
-        // Attach the raw value transiently — never persisted, safe for the caller to use in URLs
         saved.setRawToken(raw);
         return saved;
     }
 
     // Password reset tokens
+    // Now stores the OTP alongside the token hash so /verify-forgot-otp can validate it.
+    // Returns the entity (with rawToken transient field set) so callers can build the reset URL.
 
     @Transactional
-    public String createPasswordResetToken(User user) {
+    public PasswordResetToken createPasswordResetToken(User user, String otp) {
         String raw = generateSecureRandom();
-        passwordResetTokenRepository.save(PasswordResetToken.builder()
-                .user(user)
-                .tokenHash(cryptoUtils.sha256Hex(raw))
-                .expiresAt(Instant.now().plus(1, ChronoUnit.HOURS))
-                .build());
-        return raw;
+        PasswordResetToken saved = passwordResetTokenRepository.save(
+                PasswordResetToken.builder()
+                        .user(user)
+                        .tokenHash(cryptoUtils.sha256Hex(raw))
+                        .otp(otp)
+                        .otpAttempts(0)
+                        .expiresAt(Instant.now().plus(1, ChronoUnit.HOURS))
+                        .build());
+        saved.setRawToken(raw);
+        return saved;
     }
 
     // Cookie helpers
 
     public void setRefreshCookie(String rawToken, HttpServletResponse response) {
-        // Servlet Cookie API does not expose SameSite — set via raw header
         response.addHeader("Set-Cookie",
                 REFRESH_COOKIE_NAME + "=" + rawToken
                         + "; Path=/api/v1/auth"
@@ -175,8 +166,6 @@ public class TokenService {
                         + "; Max-Age=0"
                         + "; HttpOnly; Secure; SameSite=Strict");
     }
-
-    // Internal
 
     private String generateSecureRandom() {
         byte[] bytes = new byte[32];

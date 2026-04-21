@@ -52,6 +52,7 @@ public class SecurityConfig {
             "/swagger-ui.html",
             "/v3/api-docs/**",
             "/api/v1/auth/verify-otp",
+            "/api/v1/auth/verify-forgot-otp",
             "/ws/**"
     };
 

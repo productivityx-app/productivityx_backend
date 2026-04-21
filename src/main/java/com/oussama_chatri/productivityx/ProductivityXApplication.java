@@ -10,7 +10,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableAsync
 @EnableRetry
 @EnableScheduling
-public class ProductivityXApplication {
+public class    ProductivityXApplication {
 
     public static void main(String[] args) {
         SpringApplication.run(ProductivityXApplication.class, args);

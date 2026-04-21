@@ -45,9 +45,14 @@ public class EmailService {
         send(toEmail, firstName, "Verify your ProductivityX account", html);
     }
 
+    /**
+     * Sends the password reset email with both an OTP (for the mobile app) and
+     * a magic link (fallback for web). Both the link token and OTP are valid for 1 hour.
+     */
     @Async
-    public void sendPasswordResetEmail(String toEmail, String firstName, String resetUrl) {
-        String html = EmailTemplates.passwordResetEmail(firstName, resetUrl);
+    public void sendPasswordResetEmail(String toEmail, String firstName,
+                                       String resetUrl, String otp) {
+        String html = EmailTemplates.passwordResetEmail(firstName, resetUrl, otp);
         send(toEmail, firstName, "Reset your ProductivityX password", html);
     }
 
@@ -57,12 +62,6 @@ public class EmailService {
         send(toEmail, firstName, "Welcome to ProductivityX 🎉", html);
     }
 
-    /**
-     * Retries up to 3 times with exponential backoff (1 s → 2 s → 4 s).
-     * The @Async wrapper ensures the retry loop runs entirely off the request thread.
-     * If all attempts exhaust, {@link #recoverSend} logs the permanent failure without
-     * propagating — email failure must never break the primary auth flow.
-     */
     @Retryable(
             retryFor  = Exception.class,
             maxAttempts = 3,
@@ -92,7 +91,6 @@ public class EmailService {
 
     @Recover
     void recoverSend(Exception ex, String toEmail, String toName, String subject, String htmlContent) {
-        // All retry attempts exhausted — log permanently and continue without throwing
         log.error("Email delivery permanently failed after retries — to={} subject={}: {}",
                 toEmail, subject, ex.getMessage());
     }

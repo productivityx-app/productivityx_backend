@@ -3,6 +3,7 @@ package com.oussama_chatri.productivityx.features.auth.controller;
 import com.oussama_chatri.productivityx.core.dto.ApiResponse;
 import com.oussama_chatri.productivityx.features.auth.dto.request.*;
 import com.oussama_chatri.productivityx.features.auth.dto.response.AuthResponse;
+import com.oussama_chatri.productivityx.features.auth.dto.response.ForgotPasswordOtpVerifiedResponse;
 import com.oussama_chatri.productivityx.features.auth.dto.response.UserResponse;
 import com.oussama_chatri.productivityx.features.auth.service.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -20,17 +21,17 @@ import java.util.Arrays;
 @RestController
 @RequestMapping("/api/v1/auth")
 @RequiredArgsConstructor
-@Tag(name = "Auth", description = "Full auth lifecycle — register, verify, login, refresh, logout, password flows")
+@Tag(name = "Auth")
 public class AuthController {
 
     private final AuthService authService;
 
     @PostMapping("/register")
-    @Operation(summary = "Register a new account — sends a verification email on success")
-    public ResponseEntity<ApiResponse<Void>> register(
-            @Valid @RequestBody RegisterRequest request) {
+    @Operation(summary = "Register a new account — sends verification email with OTP + magic link")
+    public ResponseEntity<ApiResponse<Void>> register(@Valid @RequestBody RegisterRequest request) {
         authService.register(request);
-        return ResponseEntity.ok(ApiResponse.message("Check your email to verify your account."));
+        return ResponseEntity.status(201)
+                .body(ApiResponse.message("Check your email to verify your account."));
     }
 
     @PostMapping("/verify-email")
@@ -42,7 +43,6 @@ public class AuthController {
 
         String resolved = resolveToken(token, body != null ? body.getToken() : null);
         if (resolved == null) {
-            // Return Void error properly — no generic type mismatch
             return ResponseEntity.badRequest()
                     .body(ApiResponse.error("VAL_005", "Token is required."));
         }
@@ -99,16 +99,25 @@ public class AuthController {
     }
 
     @PostMapping("/forgot-password")
-    @Operation(summary = "Request a password reset — always returns 200 to prevent user enumeration")
+    @Operation(summary = "Request a password reset — sends email with OTP + reset link. Always returns 200.")
     public ResponseEntity<ApiResponse<Void>> forgotPassword(
             @Valid @RequestBody ForgotPasswordRequest request) {
         authService.forgotPassword(request);
         return ResponseEntity.ok(ApiResponse.message(
-                "If that email exists, a reset link has been sent."));
+                "If that email exists, a reset code has been sent."));
+    }
+
+    @PostMapping("/verify-forgot-otp")
+    @Operation(summary = "Verify the password-reset OTP — returns a short-lived resetToken for /reset-password")
+    public ResponseEntity<ApiResponse<ForgotPasswordOtpVerifiedResponse>> verifyForgotPasswordOtp(
+            @Valid @RequestBody VerifyForgotPasswordOtpRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                authService.verifyForgotPasswordOtp(request),
+                "OTP verified. Use the resetToken to set your new password."));
     }
 
     @PostMapping("/reset-password")
-    @Operation(summary = "Reset password using the token from the reset email")
+    @Operation(summary = "Reset password using the token from the reset email or verify-forgot-otp")
     public ResponseEntity<ApiResponse<Void>> resetPassword(
             @Valid @RequestBody ResetPasswordRequest request) {
         authService.resetPassword(request);

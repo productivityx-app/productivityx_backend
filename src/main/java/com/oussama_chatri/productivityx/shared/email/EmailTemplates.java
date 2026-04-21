@@ -35,14 +35,32 @@ public final class EmailTemplates {
         );
     }
 
-    public static String passwordResetEmail(String firstName, String resetUrl) {
+    /**
+     * Password reset email — includes both an OTP (for the mobile app) and a magic link (for web).
+     * The OTP is what the Android app expects. The link is a convenience fallback.
+     */
+    public static String passwordResetEmail(String firstName, String resetUrl, String otp) {
         return base(firstName,
                 "Reset your password",
                 "We received a request to reset the password for your ProductivityX account.",
-                "",
+                """
+                <div style="text-align:center;margin:24px 0;">
+                  <div style="display:inline-block;background:#252533;border-radius:12px;padding:20px 40px;">
+                    <p style="margin:0;font-size:13px;color:#888899;letter-spacing:2px;text-transform:uppercase;">
+                      Reset Code
+                    </p>
+                    <p style="margin:8px 0 0;font-size:48px;font-weight:700;letter-spacing:16px;color:#6366F1;font-family:monospace;">
+                      %s
+                    </p>
+                  </div>
+                </div>
+                <p style="text-align:center;font-size:13px;color:#888899;margin:0 0 8px;">
+                  Enter this code in the app, or click the button below to reset via link:
+                </p>
+                """.formatted(otp),
                 "Reset Password",
                 resetUrl,
-                "This link expires in 1 hour. If you did not request a password reset, no action is needed — your account is safe."
+                "This code expires in 1 hour. If you did not request a password reset, no action is needed — your account is safe."
         );
     }
 
@@ -65,7 +83,7 @@ public final class EmailTemplates {
     }
 
     private static String base(String firstName, String subject, String subtitle,
-                                String bodyContent, String ctaLabel, String ctaUrl, String footer) {
+                               String bodyContent, String ctaLabel, String ctaUrl, String footer) {
         return """
             <!DOCTYPE html>
             <html lang="en">

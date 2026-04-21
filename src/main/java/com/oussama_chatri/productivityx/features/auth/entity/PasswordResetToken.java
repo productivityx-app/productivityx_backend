@@ -29,6 +29,14 @@ public class PasswordResetToken {
     @Column(name = "token_hash", nullable = false, length = 255)
     private String tokenHash;
 
+    // 6-digit numeric OTP sent alongside the reset link
+    @Column(name = "otp", length = 6)
+    private String otp;
+
+    @Column(name = "otp_attempts", nullable = false)
+    @Builder.Default
+    private int otpAttempts = 0;
+
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
@@ -38,4 +46,7 @@ public class PasswordResetToken {
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private Instant createdAt;
+
+    @Transient
+    private String rawToken;
 }
