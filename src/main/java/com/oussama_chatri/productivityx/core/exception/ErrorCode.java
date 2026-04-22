@@ -38,6 +38,7 @@ public enum ErrorCode {
     VAL_INVALID_USERNAME("VAL_004", "Username must be 3–30 characters, alphanumeric and underscores only.", HttpStatus.BAD_REQUEST),
     VAL_REQUEST_BODY_INVALID("VAL_005", "Request body contains invalid fields.", HttpStatus.BAD_REQUEST),
     VAL_CONSTRAINT_VIOLATION("VAL_006", "One or more constraint violations.", HttpStatus.BAD_REQUEST),
+    VAL_SUBTASK_DEPTH_EXCEEDED("VAL_007", "Maximum subtask nesting depth exceeded.", HttpStatus.BAD_REQUEST),
 
     // Rate limiting
     RATE_LOGIN_EXCEEDED("RATE_001", "Too many login attempts. Please wait before trying again.", HttpStatus.TOO_MANY_REQUESTS),
