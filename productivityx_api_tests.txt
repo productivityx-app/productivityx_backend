@@ -1,0 +1,1416 @@
+###############################################################################
+# ProductivityX — Full API Test Suite (Manjaro / curl)
+# Run against: http://localhost:8080
+# Every endpoint tested with happy path + edge cases + error cases.
+# Variables captured inline with grep/sed — copy-paste top-to-bottom in order.
+###############################################################################
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SETUP — base URL (change if your backend runs on a different port)
+# ─────────────────────────────────────────────────────────────────────────────
+
+BASE="http://localhost:8080"
+
+
+###############################################################################
+# SECTION 1 — HEALTH
+###############################################################################
+
+# 1.1  Health check — expects 200 {"status":"UP"}
+curl -s "$BASE/actuator/health" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 2 — REGISTER
+# RegisterRequest: email, username, password, firstName, lastName,
+#                  phone (opt), gender (opt), birthDate (required)
+###############################################################################
+
+# 2.1  Register user 1 (primary test user)
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "oussama@test.com",
+    "username":  "oussama_dev",
+    "password":  "SecurePass1!",
+    "firstName": "Oussama",
+    "lastName":  "Chatri",
+    "phone":     "+213555000001",
+    "gender":    "MALE",
+    "birthDate": "1998-06-15"
+  }' | python3 -m json.tool
+
+# 2.2  Register user 2 (used later for ownership tests)
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "attacker@test.com",
+    "username":  "attacker_user",
+    "password":  "SecurePass1!",
+    "firstName": "Eve",
+    "lastName":  "Attacker",
+    "birthDate": "2000-01-01"
+  }' | python3 -m json.tool
+
+# 2.3  DUPLICATE email — expects 409
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "oussama@test.com",
+    "username":  "differentuser",
+    "password":  "SecurePass1!",
+    "firstName": "Clone",
+    "lastName":  "User",
+    "birthDate": "1998-01-01"
+  }' | python3 -m json.tool
+
+# 2.4  DUPLICATE username — expects 409
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "unique_email@test.com",
+    "username":  "oussama_dev",
+    "password":  "SecurePass1!",
+    "firstName": "Another",
+    "lastName":  "Guy",
+    "birthDate": "1999-05-10"
+  }' | python3 -m json.tool
+
+# 2.5  MISSING required field (birthDate) — expects 400
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "nobirthdate@test.com",
+    "username":  "nobirthdate",
+    "password":  "SecurePass1!",
+    "firstName": "No",
+    "lastName":  "BirthDate"
+  }' | python3 -m json.tool
+
+# 2.6  WEAK password (too short) — expects 400
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "weakpass@test.com",
+    "username":  "weakpass_user",
+    "password":  "abc",
+    "firstName": "Weak",
+    "lastName":  "Pass",
+    "birthDate": "1998-01-01"
+  }' | python3 -m json.tool
+
+# 2.7  INVALID email format — expects 400
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "not-an-email",
+    "username":  "emailtest",
+    "password":  "SecurePass1!",
+    "firstName": "Bad",
+    "lastName":  "Email",
+    "birthDate": "1998-01-01"
+  }' | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 3 — VERIFY EMAIL (OTP)
+# After registration, check DB for the OTP or server logs.
+# For dev testing, connect to your DB and run:
+#   SELECT otp FROM email_verification_tokens
+#     WHERE user_id = (SELECT id FROM users WHERE email='oussama@test.com')
+#     AND used_at IS NULL
+#     ORDER BY created_at DESC LIMIT 1;
+#
+# Then replace <OTP_USER1> and <OTP_USER2> below.
+###############################################################################
+
+# Capture OTP from DB (requires psql locally with dev credentials)
+OTP_USER1=$(psql -U dev -d productivityx -t -c \
+  "SELECT otp FROM email_verification_tokens \
+   WHERE user_id=(SELECT id FROM users WHERE email='oussama@test.com') \
+   AND used_at IS NULL ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d ' \n')
+
+OTP_USER2=$(psql -U dev -d productivityx -t -c \
+  "SELECT otp FROM email_verification_tokens \
+   WHERE user_id=(SELECT id FROM users WHERE email='attacker@test.com') \
+   AND used_at IS NULL ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d ' \n')
+
+echo "OTP user1: $OTP_USER1"
+echo "OTP user2: $OTP_USER2"
+
+# 3.1  Verify email — user1 — expects 200 + accessToken
+VERIFY_RESP=$(curl -s -X POST "$BASE/api/v1/auth/verify-email" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\": \"$OTP_USER1\", \"email\": \"oussama@test.com\"}")
+echo "$VERIFY_RESP" | python3 -m json.tool
+
+# 3.2  Verify email — user2 (attacker)
+VERIFY_RESP2=$(curl -s -X POST "$BASE/api/v1/auth/verify-email" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\": \"$OTP_USER2\", \"email\": \"attacker@test.com\"}")
+echo "$VERIFY_RESP2" | python3 -m json.tool
+
+# 3.3  Replay same OTP — expects 401 (token used)
+curl -s -X POST "$BASE/api/v1/auth/verify-email" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\": \"$OTP_USER1\", \"email\": \"oussama@test.com\"}" | python3 -m json.tool
+
+# 3.4  Wrong OTP — expects 401
+curl -s -X POST "$BASE/api/v1/auth/verify-email" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "000000", "email": "oussama@test.com"}' | python3 -m json.tool
+
+# 3.5  Missing token field — expects 400
+curl -s -X POST "$BASE/api/v1/auth/verify-email" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "oussama@test.com"}' | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 4 — RESEND VERIFICATION
+###############################################################################
+
+# 4.1  Resend for un-verified email (register a fresh user first for this)
+curl -s -X POST "$BASE/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":     "resend_test@test.com",
+    "username":  "resend_test_user",
+    "password":  "SecurePass1!",
+    "firstName": "Resend",
+    "lastName":  "Test",
+    "birthDate": "1995-03-20"
+  }' | python3 -m json.tool
+
+# 4.2  Resend verification email — expects 200
+curl -s -X POST "$BASE/api/v1/auth/resend-verification" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "resend_test@test.com"}' | python3 -m json.tool
+
+# 4.3  Resend for already-verified user — should still return 200 (no enumeration)
+curl -s -X POST "$BASE/api/v1/auth/resend-verification" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "oussama@test.com"}' | python3 -m json.tool
+
+# 4.4  Resend for non-existent email — expects 200 (no enumeration)
+curl -s -X POST "$BASE/api/v1/auth/resend-verification" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "ghost@test.com"}' | python3 -m json.tool
+
+# 4.5  Rate limit — send 4 times, 4th should hit rate limit (429)
+for i in {1..4}; do
+  echo "--- Attempt $i ---"
+  curl -s -X POST "$BASE/api/v1/auth/resend-verification" \
+    -H "Content-Type: application/json" \
+    -d '{"email": "resend_test@test.com"}' | python3 -m json.tool
+done
+
+
+###############################################################################
+# SECTION 5 — LOGIN
+# LoginRequest: identifier (email/username/phone), password
+###############################################################################
+
+# 5.1  Login with email — expects 200 + accessToken (refresh token in cookie)
+LOGIN_RESP=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama@test.com",
+    "password":   "SecurePass1!"
+  }')
+echo "$LOGIN_RESP"
+
+ACCESS_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+REFRESH_COOKIE=$(echo "$LOGIN_RESP" | grep -i "set-cookie:" | grep -o 'refreshToken=[^;]*')
+echo "ACCESS_TOKEN: $ACCESS_TOKEN"
+echo "REFRESH_COOKIE: $REFRESH_COOKIE"
+
+# 5.2  Login with username — expects 200
+LOGIN_BY_USERNAME=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama_dev",
+    "password":   "SecurePass1!"
+  }')
+echo "$LOGIN_BY_USERNAME" | tail -5
+
+# 5.3  Login with phone — expects 200
+curl -s -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "+213555000001",
+    "password":   "SecurePass1!"
+  }' | python3 -m json.tool
+
+# 5.4  Wrong password — expects 401
+curl -s -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama@test.com",
+    "password":   "WrongPassword!"
+  }' | python3 -m json.tool
+
+# 5.5  Non-existent user — expects 401
+curl -s -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "ghost@nowhere.com",
+    "password":   "SecurePass1!"
+  }' | python3 -m json.tool
+
+# 5.6  Unverified account — expects 403
+curl -s -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "resend_test@test.com",
+    "password":   "SecurePass1!"
+  }' | python3 -m json.tool
+
+# 5.7  Brute force — 5 wrong attempts to trigger account lock
+for i in {1..5}; do
+  echo "--- Wrong attempt $i ---"
+  curl -s -X POST "$BASE/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "identifier": "oussama@test.com",
+      "password":   "WrongPassword!"
+    }' | python3 -m json.tool
+done
+
+# 5.8  Login attacker (to get second user token for ownership tests)
+ATTACKER_RESP=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "attacker@test.com",
+    "password":   "SecurePass1!"
+  }')
+ATTACKER_TOKEN=$(echo "$ATTACKER_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+echo "ATTACKER_TOKEN: $ATTACKER_TOKEN"
+
+# NOTE: After brute-force test above, user1 is locked. Unlock it via DB if needed:
+# psql -U dev -d productivityx -c \
+#   "UPDATE users SET locked_until=NULL, failed_login_count=0 WHERE email='oussama@test.com';"
+# Then re-login:
+LOGIN_RESP=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama@test.com",
+    "password":   "SecurePass1!"
+  }')
+ACCESS_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+REFRESH_COOKIE=$(echo "$LOGIN_RESP" | grep -i "set-cookie:" | grep -o 'refreshToken=[^;]*')
+echo "Re-logged in. ACCESS_TOKEN: $ACCESS_TOKEN"
+
+
+###############################################################################
+# SECTION 6 — REFRESH TOKEN
+###############################################################################
+
+# 6.1  Refresh — expects 200 + new accessToken
+REFRESH_RESP=$(curl -si -X POST "$BASE/api/v1/auth/refresh" \
+  -H "Cookie: $REFRESH_COOKIE")
+echo "$REFRESH_RESP"
+NEW_ACCESS_TOKEN=$(echo "$REFRESH_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+NEW_REFRESH_COOKIE=$(echo "$REFRESH_RESP" | grep -i "set-cookie:" | grep -o 'refreshToken=[^;]*')
+echo "NEW_ACCESS_TOKEN: $NEW_ACCESS_TOKEN"
+
+# Update main token to the refreshed one
+ACCESS_TOKEN=$NEW_ACCESS_TOKEN
+REFRESH_COOKIE=$NEW_REFRESH_COOKIE
+
+# 6.2  Replay old refresh token — expects 401 (rotated, now revoked)
+curl -s -X POST "$BASE/api/v1/auth/refresh" \
+  -H "Cookie: refreshToken=OLD_REPLAYED_VALUE_HERE" | python3 -m json.tool
+
+# 6.3  No refresh cookie — expects 401
+curl -s -X POST "$BASE/api/v1/auth/refresh" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 7 — ME
+###############################################################################
+
+# 7.1  Get current user — expects 200 + full UserResponse
+curl -s "$BASE/api/v1/auth/me" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 7.2  No token — expects 401
+curl -s "$BASE/api/v1/auth/me" | python3 -m json.tool
+
+# 7.3  Malformed token — expects 401
+curl -s "$BASE/api/v1/auth/me" \
+  -H "Authorization: Bearer totally.invalid.token" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 8 — FORGOT PASSWORD / RESET PASSWORD
+###############################################################################
+
+# 8.1  Forgot password — always 200
+curl -s -X POST "$BASE/api/v1/auth/forgot-password" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "oussama@test.com"}' | python3 -m json.tool
+
+# 8.2  Forgot for non-existent email — also 200 (no enumeration)
+curl -s -X POST "$BASE/api/v1/auth/forgot-password" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "ghost@nowhere.com"}' | python3 -m json.tool
+
+# 8.3  Fetch reset OTP from DB
+RESET_OTP=$(psql -U dev -d productivityx -t -c \
+  "SELECT otp FROM password_reset_tokens \
+   WHERE user_id=(SELECT id FROM users WHERE email='oussama@test.com') \
+   AND used_at IS NULL ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d ' \n')
+echo "RESET_OTP: $RESET_OTP"
+
+# 8.4  Verify forgot-password OTP — expects 200 + resetToken
+VERIFY_FORGOT_RESP=$(curl -s -X POST "$BASE/api/v1/auth/verify-forgot-password-otp" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"email\": \"oussama@test.com\",
+    \"otp\":   \"$RESET_OTP\"
+  }")
+echo "$VERIFY_FORGOT_RESP" | python3 -m json.tool
+RESET_TOKEN=$(echo "$VERIFY_FORGOT_RESP" | grep -o '"resetToken":"[^"]*"' | cut -d'"' -f4)
+echo "RESET_TOKEN: $RESET_TOKEN"
+
+# 8.5  Reset password with the token — expects 200
+curl -s -X POST "$BASE/api/v1/auth/reset-password" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"token\":       \"$RESET_TOKEN\",
+    \"newPassword\": \"NewSecurePass2!\"
+  }" | python3 -m json.tool
+
+# 8.6  Replay reset token — expects 401 (already used)
+curl -s -X POST "$BASE/api/v1/auth/reset-password" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"token\":       \"$RESET_TOKEN\",
+    \"newPassword\": \"AnotherNewPass3!\"
+  }" | python3 -m json.tool
+
+# 8.7  Reset with weak new password — expects 400
+curl -s -X POST "$BASE/api/v1/auth/forgot-password" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "oussama@test.com"}' | python3 -m json.tool
+
+RESET_OTP2=$(psql -U dev -d productivityx -t -c \
+  "SELECT otp FROM password_reset_tokens \
+   WHERE user_id=(SELECT id FROM users WHERE email='oussama@test.com') \
+   AND used_at IS NULL ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d ' \n')
+
+VERIFY_FORGOT_RESP2=$(curl -s -X POST "$BASE/api/v1/auth/verify-forgot-password-otp" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"oussama@test.com\",\"otp\":\"$RESET_OTP2\"}")
+RESET_TOKEN2=$(echo "$VERIFY_FORGOT_RESP2" | grep -o '"resetToken":"[^"]*"' | cut -d'"' -f4)
+
+curl -s -X POST "$BASE/api/v1/auth/reset-password" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"token\":       \"$RESET_TOKEN2\",
+    \"newPassword\": \"weak\"
+  }" | python3 -m json.tool
+
+# 8.8  Re-login with new password
+LOGIN_RESP=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama@test.com",
+    "password":   "NewSecurePass2!"
+  }')
+ACCESS_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+REFRESH_COOKIE=$(echo "$LOGIN_RESP" | grep -i "set-cookie:" | grep -o 'refreshToken=[^;]*')
+echo "ACCESS_TOKEN after reset: $ACCESS_TOKEN"
+
+
+###############################################################################
+# SECTION 9 — CHANGE PASSWORD
+###############################################################################
+
+# 9.1  Change password (authenticated) — expects 200
+curl -s -X POST "$BASE/api/v1/auth/change-password" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "currentPassword": "NewSecurePass2!",
+    "newPassword":     "ChangedPass3!"
+  }' | python3 -m json.tool
+
+# 9.2  Wrong current password — expects 400
+curl -s -X POST "$BASE/api/v1/auth/change-password" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "currentPassword": "WrongCurrentPass!",
+    "newPassword":     "ChangedPass3!"
+  }' | python3 -m json.tool
+
+# 9.3  Weak new password — expects 400
+curl -s -X POST "$BASE/api/v1/auth/change-password" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "currentPassword": "ChangedPass3!",
+    "newPassword":     "abc"
+  }' | python3 -m json.tool
+
+# 9.4  Re-login with changed password and restore ACCESS_TOKEN
+LOGIN_RESP=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama@test.com",
+    "password":   "ChangedPass3!"
+  }')
+ACCESS_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+REFRESH_COOKIE=$(echo "$LOGIN_RESP" | grep -i "set-cookie:" | grep -o 'refreshToken=[^;]*')
+echo "ACCESS_TOKEN after change: $ACCESS_TOKEN"
+
+
+###############################################################################
+# SECTION 10 — LOGOUT
+###############################################################################
+
+# 10.1  Logout — expects 200
+curl -s -X POST "$BASE/api/v1/auth/logout" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Cookie: $REFRESH_COOKIE" | python3 -m json.tool
+
+# 10.2  Use access token after logout — still valid until expiry (JWT is stateless)
+curl -s "$BASE/api/v1/auth/me" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 10.3  Try to refresh with now-revoked cookie — expects 401
+curl -s -X POST "$BASE/api/v1/auth/refresh" \
+  -H "Cookie: $REFRESH_COOKIE" | python3 -m json.tool
+
+# Re-login for the rest of the tests
+LOGIN_RESP=$(curl -si -X POST "$BASE/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identifier": "oussama@test.com",
+    "password":   "ChangedPass3!"
+  }')
+ACCESS_TOKEN=$(echo "$LOGIN_RESP" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+REFRESH_COOKIE=$(echo "$LOGIN_RESP" | grep -i "set-cookie:" | grep -o 'refreshToken=[^;]*')
+echo "ACCESS_TOKEN restored: $ACCESS_TOKEN"
+
+
+###############################################################################
+# SECTION 11 — PROFILE
+###############################################################################
+
+# 11.1  Get profile — expects 200
+curl -s "$BASE/api/v1/profile" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 11.2  Update profile — partial update (all fields optional)
+curl -s -X PUT "$BASE/api/v1/profile" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "firstName": "Oussama_Updated",
+    "lastName":  "Chatri_Updated",
+    "bio":       "Senior dev building ProductivityX.",
+    "timezone":  "Africa/Algiers",
+    "language":  "FR",
+    "theme":     "DARK"
+  }' | python3 -m json.tool
+
+# 11.3  Update only bio — other fields unchanged
+curl -s -X PUT "$BASE/api/v1/profile" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"bio": "Just updated the bio."}' | python3 -m json.tool
+
+# 11.4  Bio too long (over 500 chars) — expects 400
+curl -s -X PUT "$BASE/api/v1/profile" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"bio\": \"$(python3 -c "print('x'*501)")\"}" | python3 -m json.tool
+
+# 11.5  Update avatar URL
+curl -s -X PATCH "$BASE/api/v1/profile/avatar" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"avatarUrl": "https://cdn.example.com/avatars/oussama.jpg"}' | python3 -m json.tool
+
+# 11.6  Avatar URL blank — expects 400
+curl -s -X PATCH "$BASE/api/v1/profile/avatar" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"avatarUrl": ""}' | python3 -m json.tool
+
+# 11.7  No auth — expects 401
+curl -s "$BASE/api/v1/profile" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 12 — PREFERENCES
+###############################################################################
+
+# 12.1  Get preferences — expects 200
+curl -s "$BASE/api/v1/preferences" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 12.2  Update preferences — all fields optional, partial update supported
+curl -s -X PUT "$BASE/api/v1/preferences" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pomodoroFocusMinutes":        30,
+    "pomodoroShortBreakMinutes":   7,
+    "pomodoroLongBreakMinutes":    20,
+    "pomodoroCyclesBeforeLongBreak": 3,
+    "pomodoroAutoStartBreaks":     true,
+    "pomodoroAutoStartFocus":      false,
+    "pomodoroSoundEnabled":        true,
+    "notifyTaskReminders":         true,
+    "notifyEventReminders":        true,
+    "notifyPomodoroEnd":           true,
+    "notifyDailySummary":          true,
+    "defaultTaskView":             "KANBAN",
+    "defaultTaskSort":             "PRIORITY",
+    "showCompletedTasks":          false,
+    "defaultCalendarView":         "MONTH",
+    "weekStartsOn":                "SUN",
+    "aiContextEnabled":            true,
+    "aiModel":                     "gemini-2.0-flash",
+    "compactMode":                 false
+  }' | python3 -m json.tool
+
+# 12.3  Update only one field — expects 200
+curl -s -X PUT "$BASE/api/v1/preferences" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"compactMode": true}' | python3 -m json.tool
+
+# 12.4  Focus minutes out of range (max=120) — expects 400
+curl -s -X PUT "$BASE/api/v1/preferences" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pomodoroFocusMinutes": 200}' | python3 -m json.tool
+
+# 12.5  Focus minutes below min (min=1) — expects 400
+curl -s -X PUT "$BASE/api/v1/preferences" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pomodoroFocusMinutes": 0}' | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 13 — TAGS
+###############################################################################
+
+# 13.1  Create tag — Work
+CREATE_TAG_RESP=$(curl -s -X POST "$BASE/api/v1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Work", "color": "#6366F1"}')
+echo "$CREATE_TAG_RESP" | python3 -m json.tool
+TAG_ID_WORK=$(echo "$CREATE_TAG_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "TAG_ID_WORK: $TAG_ID_WORK"
+
+# 13.2  Create tag — Personal
+CREATE_TAG_RESP2=$(curl -s -X POST "$BASE/api/v1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Personal", "color": "#22C55E"}')
+echo "$CREATE_TAG_RESP2" | python3 -m json.tool
+TAG_ID_PERSONAL=$(echo "$CREATE_TAG_RESP2" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "TAG_ID_PERSONAL: $TAG_ID_PERSONAL"
+
+# 13.3  Create tag — Urgent
+CREATE_TAG_RESP3=$(curl -s -X POST "$BASE/api/v1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Urgent", "color": "#EF4444"}')
+TAG_ID_URGENT=$(echo "$CREATE_TAG_RESP3" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "TAG_ID_URGENT: $TAG_ID_URGENT"
+
+# 13.4  Duplicate tag name — expects 409
+curl -s -X POST "$BASE/api/v1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Work", "color": "#AAAAAA"}' | python3 -m json.tool
+
+# 13.5  Invalid hex color — expects 400
+curl -s -X POST "$BASE/api/v1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "BadColor", "color": "notahex"}' | python3 -m json.tool
+
+# 13.6  List all tags — expects 200
+curl -s "$BASE/api/v1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 13.7  Update tag
+curl -s -X PUT "$BASE/api/v1/tags/$TAG_ID_WORK" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Work-Updated", "color": "#8B5CF6"}' | python3 -m json.tool
+
+# 13.8  Attacker tries to update user1's tag — expects 404
+curl -s -X PUT "$BASE/api/v1/tags/$TAG_ID_WORK" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Hacked", "color": "#000000"}' | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 14 — NOTES
+###############################################################################
+
+# 14.1  Create note with Markdown content and tags
+CREATE_NOTE_RESP=$(curl -s -X POST "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":   \"Sprint Planning Notes\",
+    \"content\":  \"# Sprint 5 Goals\n\n- Finish auth module\n- **Deploy** to Railway\n- Fix \`SyncWorker\` edge case\n\n> Priority: HIGH\",
+    \"tagIds\":   [\"$TAG_ID_WORK\"],
+    \"pinned\":   false
+  }")
+echo "$CREATE_NOTE_RESP" | python3 -m json.tool
+NOTE_ID_1=$(echo "$CREATE_NOTE_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "NOTE_ID_1: $NOTE_ID_1"
+
+# 14.2  Create note — no title (empty title is valid)
+CREATE_NOTE_RESP2=$(curl -s -X POST "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"content\": \"A quick thought without a title.\",
+    \"tagIds\":  [\"$TAG_ID_PERSONAL\"]
+  }")
+NOTE_ID_2=$(echo "$CREATE_NOTE_RESP2" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "NOTE_ID_2: $NOTE_ID_2"
+
+# 14.3  Create pinned note
+CREATE_NOTE_RESP3=$(curl -s -X POST "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":  \"Pinned Important Reminder\",
+    \"content\": \"Always review this daily.\",
+    \"pinned\":  true
+  }")
+NOTE_ID_3=$(echo "$CREATE_NOTE_RESP3" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "NOTE_ID_3 (pinned): $NOTE_ID_3"
+
+# 14.4  Get note by ID — expects 200
+curl -s "$BASE/api/v1/notes/$NOTE_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.5  Get non-existent note — expects 404
+curl -s "$BASE/api/v1/notes/00000000-0000-0000-0000-000000000000" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.6  Attacker tries to get user1's note — expects 404 (scoped)
+curl -s "$BASE/api/v1/notes/$NOTE_ID_1" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" | python3 -m json.tool
+
+# 14.7  List active notes (all)
+curl -s "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.8  List notes filtered by tag
+curl -s "$BASE/api/v1/notes?tagId=$TAG_ID_WORK" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.9  List pinned notes only
+curl -s "$BASE/api/v1/notes?pinned=true" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.10  Pagination — page 0 size 1
+curl -s "$BASE/api/v1/notes?page=0&size=1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.11  Update note — change title and content
+curl -s -X PUT "$BASE/api/v1/notes/$NOTE_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":   \"Sprint 5 Updated Notes\",
+    \"content\":  \"# Sprint 5 Goals (Updated)\n\n- [x] Finish auth\n- [ ] Deploy\",
+    \"tagIds\":   [\"$TAG_ID_WORK\", \"$TAG_ID_URGENT\"]
+  }" | python3 -m json.tool
+
+# 14.12  Pin note via dedicated endpoint
+curl -s -X PATCH "$BASE/api/v1/notes/$NOTE_ID_2/pin" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.13  Unpin note
+curl -s -X PATCH "$BASE/api/v1/notes/$NOTE_ID_2/unpin" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.14  Add tag to note via dedicated endpoint
+curl -s -X POST "$BASE/api/v1/notes/$NOTE_ID_1/tags" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"tagId\": \"$TAG_ID_PERSONAL\"}" | python3 -m json.tool
+
+# 14.15  Remove tag from note
+curl -s -X DELETE "$BASE/api/v1/notes/$NOTE_ID_1/tags/$TAG_ID_PERSONAL" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.16  Soft delete note (move to trash)
+curl -s -X DELETE "$BASE/api/v1/notes/$NOTE_ID_2" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.17  List trash — NOTE_ID_2 should appear
+curl -s "$BASE/api/v1/notes/trash" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.18  Try to edit a trashed note — expects 400
+curl -s -X PUT "$BASE/api/v1/notes/$NOTE_ID_2" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Should fail"}' | python3 -m json.tool
+
+# 14.19  Restore from trash
+curl -s -X PATCH "$BASE/api/v1/notes/$NOTE_ID_2/restore" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.20  Soft delete again, then permanently delete
+curl -s -X DELETE "$BASE/api/v1/notes/$NOTE_ID_2" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+curl -s -X DELETE "$BASE/api/v1/notes/$NOTE_ID_2/permanent" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.21  Try to permanently delete an active note (not in trash) — expects 400
+curl -s -X DELETE "$BASE/api/v1/notes/$NOTE_ID_1/permanent" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 14.22  Try to restore a note that is not in trash — expects 400
+curl -s -X PATCH "$BASE/api/v1/notes/$NOTE_ID_1/restore" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# Recreate note2 for later search/sync tests
+CREATE_NOTE_RESP2=$(curl -s -X POST "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":   \"Meeting Agenda\",
+    \"content\":  \"Discuss Q2 roadmap and budget allocation.\",
+    \"tagIds\":   [\"$TAG_ID_WORK\"]
+  }")
+NOTE_ID_2=$(echo "$CREATE_NOTE_RESP2" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "NOTE_ID_2 recreated: $NOTE_ID_2"
+
+
+###############################################################################
+# SECTION 15 — TASKS
+###############################################################################
+
+# 15.1  Create top-level task
+CREATE_TASK_RESP=$(curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":              "Implement JWT refresh rotation",
+    "description":        "Rotate on every /auth/refresh call. Old token revoked immediately.",
+    "status":             "TODO",
+    "priority":           "HIGH",
+    "dueDate":            "2026-05-10",
+    "dueTime":            "14:00:00",
+    "estimatedMinutes":   120,
+    "position":           0
+  }')
+echo "$CREATE_TASK_RESP" | python3 -m json.tool
+TASK_ID_1=$(echo "$CREATE_TASK_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "TASK_ID_1: $TASK_ID_1"
+
+# 15.2  Create second task
+CREATE_TASK_RESP2=$(curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":    "Write unit tests for AuthService",
+    "priority": "MEDIUM",
+    "dueDate":  "2026-05-15",
+    "position": 1
+  }')
+TASK_ID_2=$(echo "$CREATE_TASK_RESP2" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "TASK_ID_2: $TASK_ID_2"
+
+# 15.3  Create subtask of TASK_ID_1
+CREATE_SUBTASK_RESP=$(curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":        \"Write TokenService.rotateRefreshToken()\",
+    \"parentTaskId\": \"$TASK_ID_1\",
+    \"priority\":     \"HIGH\",
+    \"position\":     0
+  }")
+SUBTASK_ID_1=$(echo "$CREATE_SUBTASK_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "SUBTASK_ID_1: $SUBTASK_ID_1"
+
+# 15.4  Attempt to create grandchild (subtask of a subtask) — expects 400 (depth exceeded)
+curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":        \"Grandchild task — forbidden\",
+    \"parentTaskId\": \"$SUBTASK_ID_1\",
+    \"priority\":     \"LOW\"
+  }" | python3 -m json.tool
+
+# 15.5  Missing title — expects 400
+curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"priority": "LOW"}' | python3 -m json.tool
+
+# 15.6  Negative estimatedMinutes — expects 400
+curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Bad estimate", "estimatedMinutes": -5}' | python3 -m json.tool
+
+# 15.7  Get task by ID — expects full task WITH subtasks
+curl -s "$BASE/api/v1/tasks/$TASK_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.8  Attacker tries to get user1's task — expects 404
+curl -s "$BASE/api/v1/tasks/$TASK_ID_1" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" | python3 -m json.tool
+
+# 15.9  List all tasks (top-level only)
+curl -s "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.10  List tasks filtered by status
+curl -s "$BASE/api/v1/tasks?status=TODO" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.11  List tasks filtered by priority
+curl -s "$BASE/api/v1/tasks?priority=HIGH" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.12  List subtasks of TASK_ID_1
+curl -s "$BASE/api/v1/tasks?parentId=$TASK_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.13  Full update task
+curl -s -X PUT "$BASE/api/v1/tasks/$TASK_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":            "Implement JWT refresh rotation (REVISED)",
+    "description":      "Updated description after code review.",
+    "status":           "IN_PROGRESS",
+    "priority":         "URGENT",
+    "dueDate":          "2026-05-08",
+    "estimatedMinutes": 90
+  }' | python3 -m json.tool
+
+# 15.14  Update status to DONE via dedicated endpoint — sets completedAt
+curl -s -X PATCH "$BASE/api/v1/tasks/$TASK_ID_2/status" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "DONE"}' | python3 -m json.tool
+
+# 15.15  Update status back to TODO — clears completedAt
+curl -s -X PATCH "$BASE/api/v1/tasks/$TASK_ID_2/status" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "TODO"}' | python3 -m json.tool
+
+# 15.16  Bulk reorder (kanban drag-drop)
+curl -s -X PATCH "$BASE/api/v1/tasks/reorder" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"items\": [
+      {\"id\": \"$TASK_ID_1\", \"position\": 1},
+      {\"id\": \"$TASK_ID_2\", \"position\": 0}
+    ]
+  }" | python3 -m json.tool
+
+# 15.17  Reorder with an ID that doesn't belong to the user — expects 400
+curl -s -X PATCH "$BASE/api/v1/tasks/reorder" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"items\": [
+      {\"id\": \"$TASK_ID_1\", \"position\": 0}
+    ]
+  }" | python3 -m json.tool
+
+# 15.18  Soft delete task (moves to trash + cascades to subtask)
+curl -s -X DELETE "$BASE/api/v1/tasks/$TASK_ID_2" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.19  List trash tasks — TASK_ID_2 should appear
+curl -s "$BASE/api/v1/tasks/trash" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.20  Restore task from trash
+curl -s -X PATCH "$BASE/api/v1/tasks/$TASK_ID_2/restore" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.21  Soft delete again, then hard delete
+curl -s -X DELETE "$BASE/api/v1/tasks/$TASK_ID_2" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+curl -s -X DELETE "$BASE/api/v1/tasks/$TASK_ID_2/permanent" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 15.22  Hard delete active task (not in trash) — expects 400
+curl -s -X DELETE "$BASE/api/v1/tasks/$TASK_ID_1/permanent" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# Recreate task2 for later tests
+CREATE_TASK_RESP2=$(curl -s -X POST "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":    "Deploy backend to Railway",
+    "priority": "HIGH",
+    "dueDate":  "2026-05-20",
+    "position": 1
+  }')
+TASK_ID_2=$(echo "$CREATE_TASK_RESP2" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "TASK_ID_2 recreated: $TASK_ID_2"
+
+
+###############################################################################
+# SECTION 16 — EVENTS
+# EventRequest fields (check your EventRequest DTO):
+###############################################################################
+
+# 16.1  Create calendar event
+CREATE_EVENT_RESP=$(curl -s -X POST "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":           "Sprint 5 Planning",
+    "description":     "Plan tasks for the upcoming sprint.",
+    "location":        "Meeting Room A",
+    "startAt":         "2026-05-12T10:00:00Z",
+    "endAt":           "2026-05-12T11:30:00Z",
+    "isAllDay":        false,
+    "color":           "#6366F1",
+    "reminderMinutes": 15
+  }')
+echo "$CREATE_EVENT_RESP" | python3 -m json.tool
+EVENT_ID_1=$(echo "$CREATE_EVENT_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "EVENT_ID_1: $EVENT_ID_1"
+
+# 16.2  Create all-day event
+CREATE_EVENT_RESP2=$(curl -s -X POST "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":    "Public Holiday",
+    "startAt":  "2026-07-05T00:00:00Z",
+    "endAt":    "2026-07-05T23:59:59Z",
+    "isAllDay": true,
+    "color":    "#22C55E"
+  }')
+EVENT_ID_2=$(echo "$CREATE_EVENT_RESP2" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "EVENT_ID_2: $EVENT_ID_2"
+
+# 16.3  Create recurring event (weekly on Mon)
+CREATE_EVENT_RESP3=$(curl -s -X POST "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":           "Weekly Team Sync",
+    "startAt":         "2026-05-04T09:00:00Z",
+    "endAt":           "2026-05-04T09:30:00Z",
+    "isAllDay":        false,
+    "color":           "#8B5CF6",
+    "recurrenceRule":  "FREQ=WEEKLY;BYDAY=MO",
+    "recurrenceEndAt": "2026-12-31T23:59:59Z",
+    "reminderMinutes": 5
+  }')
+EVENT_ID_3=$(echo "$CREATE_EVENT_RESP3" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "EVENT_ID_3 (recurring): $EVENT_ID_3"
+
+# 16.4  endAt before startAt — expects 400
+curl -s -X POST "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":   "Bad Time Range",
+    "startAt": "2026-05-12T11:00:00Z",
+    "endAt":   "2026-05-12T10:00:00Z"
+  }' | python3 -m json.tool
+
+# 16.5  Missing title — expects 400
+curl -s -X POST "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "startAt": "2026-05-12T10:00:00Z",
+    "endAt":   "2026-05-12T11:00:00Z"
+  }' | python3 -m json.tool
+
+# 16.6  Get event by ID
+curl -s "$BASE/api/v1/events/$EVENT_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 16.7  Attacker tries to get user1's event — expects 404
+curl -s "$BASE/api/v1/events/$EVENT_ID_1" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" | python3 -m json.tool
+
+# 16.8  List events in a date range
+curl -s "$BASE/api/v1/events?from=2026-05-01T00:00:00Z&to=2026-05-31T23:59:59Z" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 16.9  List events — no range (should return all)
+curl -s "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 16.10  Update event
+curl -s -X PUT "$BASE/api/v1/events/$EVENT_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title":       "Sprint 5 Planning (Rescheduled)",
+    "startAt":     "2026-05-13T14:00:00Z",
+    "endAt":       "2026-05-13T15:30:00Z",
+    "location":    "Remote — Zoom",
+    "color":       "#F59E0B",
+    "reminderMinutes": 30
+  }' | python3 -m json.tool
+
+# 16.11  Soft delete event
+curl -s -X DELETE "$BASE/api/v1/events/$EVENT_ID_2" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 16.12  Restore event
+curl -s -X PATCH "$BASE/api/v1/events/$EVENT_ID_2/restore" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 16.13  Link task to event (update task with linkedEventId)
+curl -s -X PUT "$BASE/api/v1/tasks/$TASK_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\":         \"Implement JWT refresh rotation (REVISED)\",
+    \"linkedEventId\": \"$EVENT_ID_1\"
+  }" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 17 — POMODORO
+# StartSessionRequest: type (FOCUS/SHORT_BREAK/LONG_BREAK), taskId (optional)
+###############################################################################
+
+# 17.1  Start a FOCUS session linked to TASK_ID_1
+START_SESSION_RESP=$(curl -s -X POST "$BASE/api/v1/pomodoro/sessions/start" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"type\":   \"FOCUS\",
+    \"taskId\": \"$TASK_ID_1\"
+  }")
+echo "$START_SESSION_RESP" | python3 -m json.tool
+SESSION_ID_1=$(echo "$START_SESSION_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "SESSION_ID_1: $SESSION_ID_1"
+
+# 17.2  Start second session while first is active — expects 400
+curl -s -X POST "$BASE/api/v1/pomodoro/sessions/start" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "FOCUS"}' | python3 -m json.tool
+
+# 17.3  Get active session
+curl -s "$BASE/api/v1/pomodoro/sessions/active" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 17.4  Get session by ID
+curl -s "$BASE/api/v1/pomodoro/sessions/$SESSION_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 17.5  End session (completed) — actualDurationSeconds provided by client
+curl -s -X PATCH "$BASE/api/v1/pomodoro/sessions/$SESSION_ID_1/end" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"actualDurationSeconds": 1800}' | python3 -m json.tool
+
+# 17.6  End already-ended session — expects 400
+curl -s -X PATCH "$BASE/api/v1/pomodoro/sessions/$SESSION_ID_1/end" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"actualDurationSeconds": 1800}' | python3 -m json.tool
+
+# 17.7  Start SHORT_BREAK
+START_BREAK_RESP=$(curl -s -X POST "$BASE/api/v1/pomodoro/sessions/start" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "SHORT_BREAK"}')
+SESSION_ID_2=$(echo "$START_BREAK_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "SESSION_ID_2 (break): $SESSION_ID_2"
+
+# 17.8  Interrupt session with reason
+curl -s -X PATCH "$BASE/api/v1/pomodoro/sessions/$SESSION_ID_2/interrupt" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "actualDurationSeconds": 120,
+    "interruptReason":       "Urgent phone call"
+  }' | python3 -m json.tool
+
+# 17.9  Start LONG_BREAK (no linked task)
+START_LONG_RESP=$(curl -s -X POST "$BASE/api/v1/pomodoro/sessions/start" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "LONG_BREAK"}')
+SESSION_ID_3=$(echo "$START_LONG_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+curl -s -X PATCH "$BASE/api/v1/pomodoro/sessions/$SESSION_ID_3/end" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"actualDurationSeconds": 900}' | python3 -m json.tool
+
+# 17.10  List all sessions (history)
+curl -s "$BASE/api/v1/pomodoro/sessions" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 17.11  List sessions filtered by task
+curl -s "$BASE/api/v1/pomodoro/sessions?taskId=$TASK_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 17.12  Get today's stats (dashboard)
+curl -s "$BASE/api/v1/pomodoro/sessions/stats/today" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 17.13  Attacker tries to get user1's session — expects 404
+curl -s "$BASE/api/v1/pomodoro/sessions/$SESSION_ID_1" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" | python3 -m json.tool
+
+# 17.14  Start session with non-existent taskId — expects 404
+curl -s -X POST "$BASE/api/v1/pomodoro/sessions/start" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "FOCUS", "taskId": "00000000-0000-0000-0000-000000000000"}' | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 18 — AI CONVERSATIONS
+###############################################################################
+
+# 18.1  Create a new conversation
+CREATE_CONV_RESP=$(curl -s -X POST "$BASE/api/v1/ai/conversations" \
+  -H "Authorization: Bearer $ACCESS_TOKEN")
+echo "$CREATE_CONV_RESP" | python3 -m json.tool
+CONV_ID_1=$(echo "$CREATE_CONV_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+echo "CONV_ID_1: $CONV_ID_1"
+
+# 18.2  Get conversation (empty)
+curl -s "$BASE/api/v1/ai/conversations/$CONV_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 18.3  List conversations
+curl -s "$BASE/api/v1/ai/conversations" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 18.4  Send a message (SSE stream) — streams tokens
+# NOTE: This is an SSE endpoint. Use curl with --no-buffer to see tokens live.
+echo "--- Sending AI message (SSE stream) ---"
+curl -s --no-buffer -X POST "$BASE/api/v1/ai/conversations/$CONV_ID_1/messages" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"content": "What tasks do I have due today?"}' &
+sleep 5
+kill %1 2>/dev/null
+
+# 18.5  Send another message to the same conversation (builds history)
+curl -s --no-buffer -X POST "$BASE/api/v1/ai/conversations/$CONV_ID_1/messages" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"content": "Create a task: Review Q2 report, priority HIGH, due 2026-05-20"}' &
+sleep 5
+kill %1 2>/dev/null
+
+# 18.6  Get conversation after messages — should have messages and auto-title
+curl -s "$BASE/api/v1/ai/conversations/$CONV_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 18.7  Message content too long (over 10000 chars) — expects 400
+LONG_MSG=$(python3 -c "print('A' * 10001)")
+curl -s -X POST "$BASE/api/v1/ai/conversations/$CONV_ID_1/messages" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d "{\"content\": \"$LONG_MSG\"}" | python3 -m json.tool
+
+# 18.8  Message blank — expects 400
+curl -s -X POST "$BASE/api/v1/ai/conversations/$CONV_ID_1/messages" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"content": ""}' | python3 -m json.tool
+
+# 18.9  Attacker tries to send to user1's conversation — expects 404
+curl -s -X POST "$BASE/api/v1/ai/conversations/$CONV_ID_1/messages" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"content": "Hello from attacker"}' | python3 -m json.tool
+
+# 18.10  Archive (delete) conversation
+curl -s -X DELETE "$BASE/api/v1/ai/conversations/$CONV_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 18.11  List conversations — CONV_ID_1 should not appear (archived)
+curl -s "$BASE/api/v1/ai/conversations" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 18.12  Get archived conversation — check if it returns 404 or the archived conversation
+curl -s "$BASE/api/v1/ai/conversations/$CONV_ID_1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 19 — SEARCH
+###############################################################################
+
+# 19.1  Search all types — expects NOTE + TASK + EVENT results
+curl -s "$BASE/api/v1/search?q=sprint" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.2  Search notes only
+curl -s "$BASE/api/v1/search?q=planning&types=NOTE" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.3  Search tasks only
+curl -s "$BASE/api/v1/search?q=jwt&types=TASK" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.4  Search events only
+curl -s "$BASE/api/v1/search?q=sync&types=EVENT" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.5  Multi-type filter
+curl -s "$BASE/api/v1/search?q=railway&types=TASK,NOTE" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.6  Custom limit
+curl -s "$BASE/api/v1/search?q=test&limit=5" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.7  Limit clamp — over 50 should be clamped to 50
+curl -s "$BASE/api/v1/search?q=a&limit=999" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.8  Blank query — expects empty results
+curl -s "$BASE/api/v1/search?q=" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.9  No results — expects empty list
+curl -s "$BASE/api/v1/search?q=xyzzy_no_match_zzzz" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 19.10  Attacker searches — should only return their own data (empty)
+curl -s "$BASE/api/v1/search?q=sprint" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 20 — SYNC DELTA
+###############################################################################
+
+# 20.1  Delta since epoch (returns everything)
+curl -s "$BASE/api/v1/sync/delta?since=2020-01-01T00:00:00Z" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 20.2  Delta since very recent timestamp (should return very few items)
+curl -s "$BASE/api/v1/sync/delta?since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 20.3  Delta — missing since param (should either use epoch or 400, depending on impl)
+curl -s "$BASE/api/v1/sync/delta" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 20.4  Delta — future timestamp (should return empty)
+curl -s "$BASE/api/v1/sync/delta?since=2099-01-01T00:00:00Z" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 20.5  Attacker delta — should only see their own data
+curl -s "$BASE/api/v1/sync/delta?since=2020-01-01T00:00:00Z" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 21 — DELETE ACCOUNT
+###############################################################################
+
+# 21.1  Delete attacker account — expects 204/200
+curl -s -X DELETE "$BASE/api/v1/auth/account" \
+  -H "Authorization: Bearer $ATTACKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "SecurePass1!"}' | python3 -m json.tool
+
+# 21.2  Wrong password — expects 400
+curl -s -X DELETE "$BASE/api/v1/auth/account" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "wrong_password"}' | python3 -m json.tool
+
+# 21.3  Missing password — expects 400
+curl -s -X DELETE "$BASE/api/v1/auth/account" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}' | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 22 — GLOBAL ERROR HANDLING
+###############################################################################
+
+# 22.1  Malformed JSON — expects 400
+curl -s -X POST "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d 'not valid json at all{{' | python3 -m json.tool
+
+# 22.2  Wrong Content-Type — expects 415
+curl -s -X POST "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: text/plain" \
+  -d '{"title": "hello"}' | python3 -m json.tool
+
+# 22.3  Route not found — expects 404
+curl -s "$BASE/api/v1/nonexistent-route" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 22.4  Method not allowed — GET on a POST-only endpoint — expects 405
+curl -s "$BASE/api/v1/auth/login" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+
+###############################################################################
+# SECTION 23 — VERIFY TOKEN STATE (final check)
+###############################################################################
+
+# 23.1  Confirm user1 still exists with correct data
+curl -s "$BASE/api/v1/auth/me" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 23.2  Confirm all notes, tasks, events still intact
+curl -s "$BASE/api/v1/notes" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+curl -s "$BASE/api/v1/tasks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+curl -s "$BASE/api/v1/events" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+# 23.3  Final sync delta — confirm all changes are reflected
+curl -s "$BASE/api/v1/sync/delta?since=2020-01-01T00:00:00Z" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | python3 -m json.tool
+
+echo ""
+echo "==================================================================="
+echo "  ProductivityX API Test Suite — Complete"
+echo "  All sections executed. Review output above for any failed cases."
+echo "==================================================================="
