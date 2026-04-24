@@ -6,7 +6,6 @@ import com.oussama_chatri.productivityx.features.notes.repository.NoteRepository
 import com.oussama_chatri.productivityx.features.pomodoro.repository.PomodoroSessionRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -15,11 +14,6 @@ import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.util.UUID;
 
-/**
- * Cross-feature data provider for the AI context snapshot.
- * Reads from events, notes, and pomodoro repositories without creating
- * circular dependencies between those feature packages and the AI feature.
- */
 @Component
 @RequiredArgsConstructor
 @Slf4j
@@ -46,8 +40,8 @@ public class AiContextDataProviderImpl implements AiContextDataProvider {
     @Override
     public String lastEditedNoteTitle(UUID userId) {
         try {
-            var page = noteRepository.findActiveByUserId(userId, PageRequest.of(0, 1));
-            return page.isEmpty() ? null : page.getContent().get(0).getTitle();
+            // Title-only query — avoids loading the full Note entity
+            return noteRepository.findLastEditedTitleByUserId(userId).orElse(null);
         } catch (Exception ex) {
             log.warn("Could not fetch last note for AI context: {}", ex.getMessage());
             return null;

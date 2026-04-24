@@ -42,7 +42,9 @@ public class TokenService {
     @Value("${app.jwt.refresh-expiry-days:7}")
     private long refreshExpiryDays;
 
-    // Access token
+    // Profile-driven: true in prod (HTTPS), false in dev (HTTP)
+    @Value("${app.cookie.secure:true}")
+    private boolean secureCookie;
 
     public String createAccessToken(User user) {
         return jwtService.generateAccessToken(user.getId(), user.getEmail());
@@ -51,8 +53,6 @@ public class TokenService {
     public long accessExpiryMs() {
         return accessExpiryMs;
     }
-
-    // Refresh token
 
     @Transactional
     public AuthResponse issueTokenPair(User user, String ip, String deviceInfo,
@@ -77,6 +77,7 @@ public class TokenService {
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
 
         if (token.getRevokedAt() != null) {
+            // Token reuse detected — revoke all sessions for this user (theft scenario)
             refreshTokenRepository.revokeAllForUser(token.getUser().getId(), Instant.now());
             throw AppException.unauthorized(ErrorCode.AUTH_REFRESH_TOKEN_REVOKED);
         }
@@ -113,8 +114,6 @@ public class TokenService {
         refreshTokenRepository.revokeAllForUser(userId, Instant.now());
     }
 
-    // Email verification tokens
-
     @Transactional
     public EmailVerificationToken createEmailVerificationToken(User user, String otp) {
         String raw = generateSecureRandom();
@@ -129,10 +128,6 @@ public class TokenService {
         saved.setRawToken(raw);
         return saved;
     }
-
-    // Password reset tokens
-    // Now stores the OTP alongside the token hash so /verify-forgot-otp can validate it.
-    // Returns the entity (with rawToken transient field set) so callers can build the reset URL.
 
     @Transactional
     public PasswordResetToken createPasswordResetToken(User user, String otp) {
@@ -149,22 +144,24 @@ public class TokenService {
         return saved;
     }
 
-    // Cookie helpers
-
     public void setRefreshCookie(String rawToken, HttpServletResponse response) {
-        response.addHeader("Set-Cookie",
-                REFRESH_COOKIE_NAME + "=" + rawToken
-                        + "; Path=/api/v1/auth"
-                        + "; Max-Age=" + (refreshExpiryDays * 24 * 3600)
-                        + "; HttpOnly; Secure; SameSite=Strict");
+        String cookie = REFRESH_COOKIE_NAME + "=" + rawToken
+                + "; Path=/api/v1/auth"
+                + "; Max-Age=" + (refreshExpiryDays * 24 * 3600)
+                + "; HttpOnly"
+                + (secureCookie ? "; Secure" : "")
+                + "; SameSite=Strict";
+        response.addHeader("Set-Cookie", cookie);
     }
 
     public void clearRefreshCookie(HttpServletResponse response) {
-        response.addHeader("Set-Cookie",
-                REFRESH_COOKIE_NAME + "="
-                        + "; Path=/api/v1/auth"
-                        + "; Max-Age=0"
-                        + "; HttpOnly; Secure; SameSite=Strict");
+        String cookie = REFRESH_COOKIE_NAME + "="
+                + "; Path=/api/v1/auth"
+                + "; Max-Age=0"
+                + "; HttpOnly"
+                + (secureCookie ? "; Secure" : "")
+                + "; SameSite=Strict";
+        response.addHeader("Set-Cookie", cookie);
     }
 
     private String generateSecureRandom() {

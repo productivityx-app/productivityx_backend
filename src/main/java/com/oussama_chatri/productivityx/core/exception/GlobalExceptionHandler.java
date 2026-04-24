@@ -47,68 +47,80 @@ public class GlobalExceptionHandler {
                 .map(v -> v.getPropertyPath() + ": " + v.getMessage())
                 .collect(Collectors.joining("; "));
         return ResponseEntity.badRequest()
-                .body(ApiResponse.error(ErrorCode.VAL_CONSTRAINT_VIOLATION.getCode(), message));
+                .body(ApiResponse.error(ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(), message));
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse<Void>> handleUnreadableBody(HttpMessageNotReadableException ex) {
         return ResponseEntity.badRequest()
-                .body(ApiResponse.error(ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(),
                         "Malformed or missing request body."));
     }
 
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<ApiResponse<Void>> handleMissingParam(MissingServletRequestParameterException ex) {
         return ResponseEntity.badRequest()
-                .body(ApiResponse.error(ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(),
                         "Required parameter '" + ex.getParameterName() + "' is missing."));
     }
 
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ApiResponse<Void>> handleAccessDenied(AccessDeniedException ex) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                .body(ApiResponse.error(ErrorCode.GEN_FORBIDDEN.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.GEN_FORBIDDEN.getCode(),
                         ErrorCode.GEN_FORBIDDEN.getMessage()));
     }
 
     @ExceptionHandler(BadCredentialsException.class)
     public ResponseEntity<ApiResponse<Void>> handleBadCredentials(BadCredentialsException ex) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .body(ApiResponse.error(ErrorCode.AUTH_INVALID_CREDENTIALS.getCode(),
-                        ErrorCode.AUTH_INVALID_CREDENTIALS.getMessage()));
+                .body(ApiResponse.error(
+                        ErrorCode.AUTH_WRONG_PASSWORD.getCode(),
+                        ErrorCode.AUTH_WRONG_PASSWORD.getMessage()));
     }
 
     @ExceptionHandler(LockedException.class)
     public ResponseEntity<ApiResponse<Void>> handleLocked(LockedException ex) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                .body(ApiResponse.error(ErrorCode.AUTH_ACCOUNT_LOCKED.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.AUTH_ACCOUNT_LOCKED.getCode(),
                         ErrorCode.AUTH_ACCOUNT_LOCKED.getMessage()));
     }
 
     @ExceptionHandler(DisabledException.class)
     public ResponseEntity<ApiResponse<Void>> handleDisabled(DisabledException ex) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                .body(ApiResponse.error(ErrorCode.AUTH_ACCOUNT_INACTIVE.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.AUTH_ACCOUNT_INACTIVE.getCode(),
                         ErrorCode.AUTH_ACCOUNT_INACTIVE.getMessage()));
     }
 
+    // CRITICAL: Never pass ex.getMessage() to the client — it can expose Spring internal state.
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ApiResponse<Void>> handleAuthentication(AuthenticationException ex) {
+        log.debug("AuthenticationException: {}", ex.getMessage());
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .body(ApiResponse.error(ErrorCode.AUTH_TOKEN_INVALID.getCode(), ex.getMessage()));
+                .body(ApiResponse.error(
+                        ErrorCode.AUTH_UNAUTHENTICATED.getCode(),
+                        ErrorCode.AUTH_UNAUTHENTICATED.getMessage()));
     }
 
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<ApiResponse<Void>> handleMethodNotAllowed(HttpRequestMethodNotSupportedException ex) {
         return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
-                .body(ApiResponse.error(ErrorCode.GEN_METHOD_NOT_ALLOWED.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.GEN_METHOD_NOT_ALLOWED.getCode(),
                         ErrorCode.GEN_METHOD_NOT_ALLOWED.getMessage()));
     }
 
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     public ResponseEntity<ApiResponse<Void>> handleMediaType(HttpMediaTypeNotSupportedException ex) {
         return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
-                .body(ApiResponse.error(ErrorCode.GEN_MEDIA_TYPE_UNSUPPORTED.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.GEN_MEDIA_TYPE_UNSUPPORTED.getCode(),
                         ErrorCode.GEN_MEDIA_TYPE_UNSUPPORTED.getMessage()));
     }
 
@@ -116,7 +128,8 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleGeneric(Exception ex) {
         log.error("Unhandled exception: {}", ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(ApiResponse.error(ErrorCode.GEN_INTERNAL_ERROR.getCode(),
+                .body(ApiResponse.error(
+                        ErrorCode.GEN_INTERNAL_ERROR.getCode(),
                         ErrorCode.GEN_INTERNAL_ERROR.getMessage()));
     }
 }

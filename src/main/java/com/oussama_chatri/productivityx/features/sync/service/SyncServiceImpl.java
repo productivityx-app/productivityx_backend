@@ -1,5 +1,7 @@
 package com.oussama_chatri.productivityx.features.sync.service;
 
+import com.oussama_chatri.productivityx.core.exception.AppException;
+import com.oussama_chatri.productivityx.core.exception.ErrorCode;
 import com.oussama_chatri.productivityx.core.util.SecurityUtils;
 import com.oussama_chatri.productivityx.features.events.dto.response.EventResponse;
 import com.oussama_chatri.productivityx.features.events.repository.EventRepository;
@@ -16,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -24,6 +27,9 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Slf4j
 public class SyncServiceImpl implements SyncService {
+
+    // Prevent loading the entire history when a client passes a very old timestamp
+    private static final int MAX_SYNC_RANGE_DAYS = 30;
 
     private final NoteRepository            noteRepository;
     private final TaskRepository            taskRepository;
@@ -34,6 +40,11 @@ public class SyncServiceImpl implements SyncService {
     @Override
     @Transactional(readOnly = true)
     public DeltaSyncResponse delta(Instant since) {
+        Instant maxSince = Instant.now().minus(MAX_SYNC_RANGE_DAYS, ChronoUnit.DAYS);
+        if (since.isBefore(maxSince)) {
+            throw AppException.badRequest(ErrorCode.VAL_SYNC_RANGE_TOO_LARGE);
+        }
+
         UUID userId = securityUtils.currentUserId();
 
         List<NoteResponse> notes = noteRepository

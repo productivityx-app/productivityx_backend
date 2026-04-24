@@ -210,7 +210,7 @@ public class AuthServiceImpl implements AuthService {
         rateLimiterService.checkLoginLimit(ip);
 
         User user = userRepository.findByIdentifier(request.getIdentifier())
-                .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_INVALID_CREDENTIALS));
+                .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_USER_NOT_FOUND));
 
         if (!user.isActive()) {
             throw AppException.forbidden(ErrorCode.AUTH_ACCOUNT_INACTIVE);
@@ -231,7 +231,8 @@ public class AuthServiceImpl implements AuthService {
             }
             userRepository.save(user);
             auditService.log(AuditEvent.LOGIN_FAILURE, user.getId(), ip);
-            throw AppException.unauthorized(ErrorCode.AUTH_INVALID_CREDENTIALS);
+
+            throw AppException.unauthorized(ErrorCode.AUTH_WRONG_PASSWORD);
         }
 
         if (!user.isEmailVerified()) {

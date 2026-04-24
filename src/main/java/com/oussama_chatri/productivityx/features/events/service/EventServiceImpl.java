@@ -32,8 +32,6 @@ public class EventServiceImpl implements EventService {
     private final PageableUtils     pageableUtils;
     private final WebSocketNotifier wsNotifier;
 
-    // Create
-
     @Override
     @Transactional
     public EventResponse create(EventRequest request) {
@@ -47,8 +45,6 @@ public class EventServiceImpl implements EventService {
         log.debug("Event created id={} user={}", saved.getId(), user.getId());
         return EventResponse.from(saved);
     }
-
-    // Read
 
     @Override
     @Transactional(readOnly = true)
@@ -65,8 +61,7 @@ public class EventServiceImpl implements EventService {
                     "'from' and 'to' are required for range queries.");
         }
         if (!from.isBefore(to)) {
-            throw AppException.badRequest(ErrorCode.VAL_REQUEST_BODY_INVALID,
-                    "'from' must be before 'to'.");
+            throw AppException.badRequest(ErrorCode.VAL_EVENT_TIME_RANGE);
         }
 
         UUID userId = securityUtils.currentUserId();
@@ -94,8 +89,6 @@ public class EventServiceImpl implements EventService {
                 eventRepository.findDeletedByUserId(userId, pageable).map(EventResponse::from));
     }
 
-    // Update
-
     @Override
     @Transactional
     public EventResponse update(UUID eventId, EventRequest request) {
@@ -103,8 +96,7 @@ public class EventServiceImpl implements EventService {
         Event event  = findOwnedEvent(eventId, userId);
 
         if (event.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_EVENT_NOT_FOUND,
-                    "Cannot edit a trashed event. Restore it first.");
+            throw AppException.badRequest(ErrorCode.VAL_NOTE_TRASHED);
         }
 
         applyUpdate(event, request);
@@ -116,8 +108,6 @@ public class EventServiceImpl implements EventService {
         log.debug("Event updated id={} user={}", eventId, userId);
         return EventResponse.from(saved);
     }
-
-    // Soft delete
 
     @Override
     @Transactional
@@ -133,8 +123,6 @@ public class EventServiceImpl implements EventService {
         log.debug("Event soft-deleted id={} user={}", eventId, userId);
         return EventResponse.from(saved);
     }
-
-    // Restore
 
     @Override
     @Transactional
@@ -156,8 +144,6 @@ public class EventServiceImpl implements EventService {
         return EventResponse.from(saved);
     }
 
-    // Hard delete
-
     @Override
     @Transactional
     public void hardDelete(UUID eventId) {
@@ -174,34 +160,30 @@ public class EventServiceImpl implements EventService {
         log.debug("Event permanently deleted id={} user={}", eventId, userId);
     }
 
-    // Delete all instances in a recurring series
-
     @Override
     @Transactional
     public void deleteSeriesFromParent(UUID parentEventId) {
         UUID  userId = securityUtils.currentUserId();
         Event parent = findOwnedEvent(parentEventId, userId);
 
-        // Soft-delete the parent
+        Instant now = Instant.now();
+
         parent.setDeleted(true);
-        parent.setDeletedAt(Instant.now());
+        parent.setDeletedAt(now);
         eventRepository.save(parent);
 
-        // Soft-delete all instances
+        // Bulk soft-delete all instances in one saveAll call
         List<Event> instances = eventRepository.findActiveInstancesByParentId(parentEventId);
-        Instant now = Instant.now();
-        for (Event instance : instances) {
+        instances.forEach(instance -> {
             instance.setDeleted(true);
             instance.setDeletedAt(now);
-            eventRepository.save(instance);
-        }
+        });
+        eventRepository.saveAll(instances);
 
         wsNotifier.notifyUser(userId, "events.deleted", parentEventId);
         log.debug("Recurring series deleted parentId={} instanceCount={} user={}",
                 parentEventId, instances.size(), userId);
     }
-
-    // Private helpers
 
     private Event buildEvent(User user, EventRequest request) {
         Event.EventBuilder builder = Event.builder()
@@ -226,32 +208,22 @@ public class EventServiceImpl implements EventService {
     }
 
     private void applyUpdate(Event event, EventRequest request) {
-        if (request.getTitle() != null)
-            event.setTitle(request.getTitle().trim());
-        if (request.getDescription() != null)
-            event.setDescription(request.getDescription());
-        if (request.getLocation() != null)
-            event.setLocation(request.getLocation());
-        if (request.getStartAt() != null)
-            event.setStartAt(request.getStartAt());
-        if (request.getEndAt() != null)
-            event.setEndAt(request.getEndAt());
-        if (request.getAllDay() != null)
-            event.setAllDay(request.getAllDay());
-        if (request.getColor() != null)
-            event.setColor(request.getColor());
-        if (request.getRecurrenceRule() != null)
-            event.setRecurrenceRule(request.getRecurrenceRule());
-        if (request.getRecurrenceEndAt() != null)
-            event.setRecurrenceEndAt(request.getRecurrenceEndAt());
-        if (request.getReminderMinutes() != null)
-            event.setReminderMinutes(request.getReminderMinutes());
+        if (request.getTitle() != null)          event.setTitle(request.getTitle().trim());
+        if (request.getDescription() != null)    event.setDescription(request.getDescription());
+        if (request.getLocation() != null)       event.setLocation(request.getLocation());
+        if (request.getStartAt() != null)        event.setStartAt(request.getStartAt());
+        if (request.getEndAt() != null)          event.setEndAt(request.getEndAt());
+        if (request.getAllDay() != null)          event.setAllDay(request.getAllDay());
+        if (request.getColor() != null)          event.setColor(request.getColor());
+        if (request.getRecurrenceRule() != null) event.setRecurrenceRule(request.getRecurrenceRule());
+        if (request.getRecurrenceEndAt() != null) event.setRecurrenceEndAt(request.getRecurrenceEndAt());
+        if (request.getReminderMinutes() != null) event.setReminderMinutes(request.getReminderMinutes());
     }
 
+    // Dedicated error code instead of the generic VAL_REQUEST_BODY_INVALID
     private void validateTimeRange(Instant startAt, Instant endAt) {
         if (!startAt.isBefore(endAt)) {
-            throw AppException.badRequest(ErrorCode.VAL_REQUEST_BODY_INVALID,
-                    "End time must be after start time.");
+            throw AppException.badRequest(ErrorCode.VAL_EVENT_TIME_RANGE);
         }
     }
 

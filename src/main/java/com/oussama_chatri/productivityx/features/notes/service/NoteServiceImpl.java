@@ -23,7 +23,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -40,9 +42,9 @@ public class NoteServiceImpl implements NoteService {
     @Override
     @Transactional
     public NoteResponse create(NoteRequest request) {
-        User user   = securityUtils.currentUser();
-        Note note   = buildNote(user, request);
-        Note saved  = noteRepository.save(note);
+        User user  = securityUtils.currentUser();
+        Note note  = buildNote(user, request);
+        Note saved = noteRepository.save(note);
 
         wsNotifier.notifyUser(user.getId(), "notes.created", NoteResponse.from(saved));
         log.debug("Note created id={} user={}", saved.getId(), user.getId());
@@ -59,7 +61,7 @@ public class NoteServiceImpl implements NoteService {
     @Override
     @Transactional(readOnly = true)
     public PagedResponse<NoteResponse> listActive(int page, int size, UUID tagId, Boolean pinned) {
-        UUID userId  = securityUtils.currentUserId();
+        UUID userId   = securityUtils.currentUserId();
         Pageable pageable = pageableUtils.build(page, size,
                 Sort.by(Sort.Direction.DESC, "pinned", "updatedAt"));
 
@@ -78,7 +80,7 @@ public class NoteServiceImpl implements NoteService {
     @Override
     @Transactional(readOnly = true)
     public PagedResponse<NoteResponse> listTrash(int page, int size) {
-        UUID userId  = securityUtils.currentUserId();
+        UUID userId   = securityUtils.currentUserId();
         Pageable pageable = pageableUtils.build(page, size);
         return pageableUtils.toPagedResponse(
                 noteRepository.findDeletedByUserId(userId, pageable).map(NoteResponse::from));
@@ -91,8 +93,7 @@ public class NoteServiceImpl implements NoteService {
         Note note   = findOwnedNote(noteId, userId);
 
         if (note.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_NOTE_NOT_FOUND,
-                    "Cannot edit a trashed note. Restore it first.");
+            throw AppException.badRequest(ErrorCode.VAL_NOTE_TRASHED);
         }
 
         applyContentUpdate(note, request);
@@ -123,7 +124,7 @@ public class NoteServiceImpl implements NoteService {
 
         note.setDeleted(true);
         note.setDeletedAt(Instant.now());
-        note.setPinned(false); // unpin on trash
+        note.setPinned(false);
 
         Note saved = noteRepository.save(note);
         wsNotifier.notifyUser(userId, "notes.deleted", NoteResponse.from(saved));
@@ -137,8 +138,7 @@ public class NoteServiceImpl implements NoteService {
         Note note   = findOwnedNote(noteId, userId);
 
         if (!note.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_NOTE_NOT_FOUND,
-                    "Note is not in trash.");
+            throw AppException.badRequest(ErrorCode.VAL_NOTE_NOT_IN_TRASH);
         }
 
         note.setDeleted(false);
@@ -156,8 +156,7 @@ public class NoteServiceImpl implements NoteService {
         Note note   = findOwnedNote(noteId, userId);
 
         if (!note.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_NOTE_NOT_FOUND,
-                    "Move the note to trash before permanently deleting it.");
+            throw AppException.badRequest(ErrorCode.VAL_NOTE_MUST_BE_TRASHED_FIRST);
         }
 
         noteRepository.delete(note);
@@ -192,12 +191,10 @@ public class NoteServiceImpl implements NoteService {
         return NoteResponse.from(saved);
     }
 
-    // Private helpers
-
     private Note buildNote(User user, NoteRequest request) {
-        String content      = request.getContent() != null ? request.getContent() : "";
-        String plainText    = contentProcessor.toPlainText(content);
-        int    wordCount    = contentProcessor.wordCount(plainText);
+        String content   = request.getContent() != null ? request.getContent() : "";
+        String plainText = contentProcessor.toPlainText(content);
+        int    wordCount = contentProcessor.wordCount(plainText);
 
         Note.NoteBuilder builder = Note.builder()
                 .user(user)
@@ -249,11 +246,11 @@ public class NoteServiceImpl implements NoteService {
                 .orElseThrow(() -> AppException.notFound(ErrorCode.RES_NOTE_NOT_FOUND));
     }
 
-    private java.util.Set<Tag> resolveTagsForUser(java.util.Set<UUID> tagIds, UUID userId) {
-        java.util.Set<Tag> tags = new java.util.HashSet<>();
-        for (UUID tagId : tagIds) {
-            tags.add(tagRepository.findByIdAndUserId(tagId, userId)
-                    .orElseThrow(() -> AppException.notFound(ErrorCode.RES_TAG_NOT_FOUND)));
+    // Single-query bulk tag load — eliminates N+1 from iterating individually
+    private Set<Tag> resolveTagsForUser(Set<UUID> tagIds, UUID userId) {
+        Set<Tag> tags = tagRepository.findAllByIdInAndUserId(tagIds, userId);
+        if (tags.size() != tagIds.size()) {
+            throw AppException.notFound(ErrorCode.RES_TAG_NOT_FOUND);
         }
         return tags;
     }

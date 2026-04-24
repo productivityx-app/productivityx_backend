@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Repository
@@ -19,7 +20,10 @@ public interface TagRepository extends JpaRepository<Tag, UUID> {
 
     boolean existsByUserIdAndName(UUID userId, String name);
 
-    // Tags with their note-count for the current user (UI display)
+    // Single-query bulk load — replaces N+1 loop in NoteServiceImpl
+    @Query("SELECT t FROM Tag t WHERE t.id IN :ids AND t.userId = :userId")
+    Set<Tag> findAllByIdInAndUserId(@Param("ids") Set<UUID> ids, @Param("userId") UUID userId);
+
     @Query("""
             SELECT t, COUNT(n) FROM Tag t
             LEFT JOIN t.notes n ON n.deleted = false

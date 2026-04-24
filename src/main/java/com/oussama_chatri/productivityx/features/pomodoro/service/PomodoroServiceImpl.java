@@ -16,6 +16,7 @@ import com.oussama_chatri.productivityx.features.pomodoro.entity.PomodoroSession
 import com.oussama_chatri.productivityx.features.pomodoro.repository.PomodoroSessionRepository;
 import com.oussama_chatri.productivityx.features.preferences.entity.UserPreferences;
 import com.oussama_chatri.productivityx.features.preferences.repository.UserPreferencesRepository;
+import com.oussama_chatri.productivityx.features.tasks.repository.TaskRepository;
 import com.oussama_chatri.productivityx.features.tasks.service.TaskService;
 import com.oussama_chatri.productivityx.shared.websocket.WebSocketNotifier;
 import lombok.RequiredArgsConstructor;
@@ -37,31 +38,26 @@ public class PomodoroServiceImpl implements PomodoroService {
     private final PomodoroSessionRepository sessionRepository;
     private final UserPreferencesRepository preferencesRepository;
     private final TaskService               taskService;
+    private final TaskRepository            taskRepository;
     private final SecurityUtils             securityUtils;
     private final PageableUtils             pageableUtils;
     private final WebSocketNotifier         wsNotifier;
-
-    // Start
 
     @Override
     @Transactional
     public PomodoroSessionResponse startSession(StartSessionRequest request) {
         User user = securityUtils.currentUser();
 
-        // Enforce single active session per user
         sessionRepository.findActiveByUserId(user.getId()).ifPresent(active -> {
-            throw AppException.badRequest(ErrorCode.VAL_REQUEST_BODY_INVALID,
-                    "You already have an active session. End it before starting a new one.");
+            throw AppException.badRequest(ErrorCode.VAL_SESSION_ALREADY_ACTIVE);
         });
 
-        // Optionally validate taskId ownership — we do a lightweight existence check
-        // without loading the full Task entity to keep this service decoupled
         if (request.getTaskId() != null) {
             validateTaskOwnership(request.getTaskId(), user.getId());
         }
 
-        UserPreferences prefs = findPreferences(user.getId());
-        int plannedSeconds    = resolvedPlannedSeconds(request.getType(), prefs);
+        UserPreferences prefs    = findPreferences(user.getId());
+        int plannedSeconds        = resolvedPlannedSeconds(request.getType(), prefs);
 
         PomodoroSession session = PomodoroSession.builder()
                 .user(user)
@@ -81,8 +77,6 @@ public class PomodoroServiceImpl implements PomodoroService {
         return PomodoroSessionResponse.from(saved);
     }
 
-    // End (completed)
-
     @Override
     @Transactional
     public PomodoroSessionResponse endSession(UUID sessionId, EndSessionRequest request) {
@@ -100,7 +94,6 @@ public class PomodoroServiceImpl implements PomodoroService {
 
         PomodoroSession saved = sessionRepository.save(session);
 
-        // Credit actual minutes to the linked task
         if (session.getType() == PomodoroType.FOCUS && session.getTaskId() != null) {
             int minutes = (int) Math.ceil(actualSeconds / 60.0);
             taskService.addActualMinutes(session.getTaskId(), minutes);
@@ -110,8 +103,6 @@ public class PomodoroServiceImpl implements PomodoroService {
         log.debug("Pomodoro session completed id={} actualSeconds={} user={}", sessionId, actualSeconds, userId);
         return PomodoroSessionResponse.from(saved);
     }
-
-    // Interrupt
 
     @Override
     @Transactional
@@ -132,7 +123,6 @@ public class PomodoroServiceImpl implements PomodoroService {
 
         PomodoroSession saved = sessionRepository.save(session);
 
-        // Still credit partial focus time to the linked task
         if (session.getType() == PomodoroType.FOCUS
                 && session.getTaskId() != null
                 && actualSeconds > 0) {
@@ -146,8 +136,6 @@ public class PomodoroServiceImpl implements PomodoroService {
         return PomodoroSessionResponse.from(saved);
     }
 
-    // Active session
-
     @Override
     @Transactional(readOnly = true)
     public PomodoroSessionResponse getActiveSession() {
@@ -156,8 +144,6 @@ public class PomodoroServiceImpl implements PomodoroService {
                 .map(PomodoroSessionResponse::from)
                 .orElse(null);
     }
-
-    // History
 
     @Override
     @Transactional(readOnly = true)
@@ -183,8 +169,6 @@ public class PomodoroServiceImpl implements PomodoroService {
         return PomodoroSessionResponse.from(findOwnedSession(sessionId, userId));
     }
 
-    // Today's stats
-
     @Override
     @Transactional(readOnly = true)
     public PomodoroStatsResponse getTodayStats() {
@@ -202,8 +186,6 @@ public class PomodoroServiceImpl implements PomodoroService {
                 .build();
     }
 
-    // Private helpers
-
     private PomodoroSession findOwnedSession(UUID sessionId, UUID userId) {
         return sessionRepository.findByIdAndUserId(sessionId, userId)
                 .orElseThrow(() -> AppException.notFound(ErrorCode.RES_POMODORO_SESSION_NOT_FOUND));
@@ -216,8 +198,7 @@ public class PomodoroServiceImpl implements PomodoroService {
 
     private void assertSessionIsActive(PomodoroSession session) {
         if (session.getEndedAt() != null) {
-            throw AppException.badRequest(ErrorCode.VAL_REQUEST_BODY_INVALID,
-                    "This session has already ended.");
+            throw AppException.badRequest(ErrorCode.VAL_SESSION_ALREADY_ENDED);
         }
     }
 
@@ -229,25 +210,16 @@ public class PomodoroServiceImpl implements PomodoroService {
         };
     }
 
-    /**
-     * Prefers the client-supplied value when present and plausible.
-     * Falls back to server-computed elapsed time to guard against clients
-     * sending inflated values.
-     */
     private int resolveActualSeconds(Integer clientValue, Instant startedAt, Instant now) {
         int serverComputed = (int) (now.getEpochSecond() - startedAt.getEpochSecond());
         if (clientValue == null || clientValue <= 0) return Math.max(serverComputed, 0);
-        // Accept client value only if within a 30-second tolerance of server time
         if (Math.abs(clientValue - serverComputed) <= 30) return clientValue;
         return serverComputed;
     }
 
+    // Lightweight ownership check — does not load the full Task entity
     private void validateTaskOwnership(UUID taskId, UUID userId) {
-        // Lightweight ownership check — TaskService.addActualMinutes already guards the DB write
-        // but we want to surface a 404 immediately at session start rather than at session end
-        try {
-            taskService.getById(taskId);
-        } catch (AppException ex) {
+        if (!taskRepository.existsByIdAndUserId(taskId, userId)) {
             throw AppException.notFound(ErrorCode.RES_TASK_NOT_FOUND);
         }
     }

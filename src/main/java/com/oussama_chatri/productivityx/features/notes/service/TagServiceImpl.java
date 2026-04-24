@@ -29,7 +29,7 @@ public class TagServiceImpl implements TagService {
         User user = securityUtils.currentUser();
 
         if (tagRepository.existsByUserIdAndName(user.getId(), request.getName().trim())) {
-            throw AppException.conflict(ErrorCode.VAL_CONSTRAINT_VIOLATION);
+            throw AppException.conflict(ErrorCode.VAL_DUPLICATE_TAG_NAME);
         }
 
         Tag tag = tagRepository.save(Tag.builder()
@@ -58,7 +58,7 @@ public class TagServiceImpl implements TagService {
 
         if (!tag.getName().equals(request.getName().trim())
                 && tagRepository.existsByUserIdAndName(userId, request.getName().trim())) {
-            throw AppException.conflict(ErrorCode.VAL_CONSTRAINT_VIOLATION);
+            throw AppException.conflict(ErrorCode.VAL_DUPLICATE_TAG_NAME);
         }
 
         tag.setName(request.getName().trim());
@@ -72,7 +72,6 @@ public class TagServiceImpl implements TagService {
     public void delete(UUID tagId) {
         UUID userId = securityUtils.currentUserId();
         Tag  tag    = findOwnedTag(tagId, userId);
-        // JPA cascade removes rows from note_tags join table automatically
         tagRepository.delete(tag);
     }
 

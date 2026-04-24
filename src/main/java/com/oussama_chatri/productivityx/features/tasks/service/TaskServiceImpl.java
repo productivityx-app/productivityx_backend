@@ -23,8 +23,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -33,28 +33,24 @@ import java.util.stream.Collectors;
 @Slf4j
 public class TaskServiceImpl implements TaskService {
 
-    private static final int MAX_SUBTASK_DEPTH = 1; // parent → child only; grandchildren are forbidden
+    private static final int MAX_SUBTASK_DEPTH = 1;
 
     private final TaskRepository    taskRepository;
     private final SecurityUtils     securityUtils;
     private final PageableUtils     pageableUtils;
     private final WebSocketNotifier wsNotifier;
 
-    // Create
-
     @Override
     @Transactional
     public TaskResponse create(TaskRequest request) {
-        User user   = securityUtils.currentUser();
-        Task task   = buildTask(user, request);
-        Task saved  = taskRepository.save(task);
+        User user  = securityUtils.currentUser();
+        Task task  = buildTask(user, request);
+        Task saved = taskRepository.save(task);
 
         wsNotifier.notifyUser(user.getId(), "tasks.created", TaskResponse.from(saved));
         log.debug("Task created id={} user={}", saved.getId(), user.getId());
         return TaskResponse.from(saved);
     }
-
-    // Read
 
     @Override
     @Transactional(readOnly = true)
@@ -74,9 +70,7 @@ public class TaskServiceImpl implements TaskService {
         Page<Task> taskPage;
 
         if (parentId != null) {
-            // Subtasks of a specific parent — returned as a paged list for consistency
             List<Task> subtasks = taskRepository.findActiveSubtasksByParentId(parentId);
-            // Manual paging for the subtask list (typically small — no DB-level pagination needed)
             int start = (int) pageable.getOffset();
             int end   = Math.min(start + pageable.getPageSize(), subtasks.size());
             List<Task> pageContent = start >= subtasks.size() ? List.of() : subtasks.subList(start, end);
@@ -114,8 +108,6 @@ public class TaskServiceImpl implements TaskService {
                 taskRepository.findDeletedByUserId(userId, pageable).map(TaskResponse::from));
     }
 
-    // Update
-
     @Override
     @Transactional
     public TaskResponse update(UUID taskId, TaskRequest request) {
@@ -123,8 +115,7 @@ public class TaskServiceImpl implements TaskService {
         Task task   = findOwnedTask(taskId, userId);
 
         if (task.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_TASK_NOT_FOUND,
-                    "Cannot edit a trashed task. Restore it first.");
+            throw AppException.badRequest(ErrorCode.VAL_NOTE_TRASHED);
         }
 
         applyUpdate(task, request, userId);
@@ -142,14 +133,12 @@ public class TaskServiceImpl implements TaskService {
         Task task   = findOwnedTask(taskId, userId);
 
         if (task.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_TASK_NOT_FOUND,
-                    "Cannot update status of a trashed task.");
+            throw AppException.badRequest(ErrorCode.VAL_NOTE_TRASHED);
         }
 
         TaskStatus newStatus = request.getStatus();
         task.setStatus(newStatus);
 
-        // Manage completedAt timestamp as part of the status transition
         if (newStatus == TaskStatus.DONE) {
             if (task.getCompletedAt() == null) {
                 task.setCompletedAt(Instant.now());
@@ -166,8 +155,6 @@ public class TaskServiceImpl implements TaskService {
         return TaskResponse.from(saved);
     }
 
-    // Reorder
-
     @Override
     @Transactional
     public void reorder(ReorderRequest request) {
@@ -177,23 +164,24 @@ public class TaskServiceImpl implements TaskService {
                 .map(ReorderRequest.ReorderItem::getId)
                 .collect(Collectors.toList());
 
-        // Single ownership batch check — avoids N individual ownership queries
         long ownedCount = taskRepository.countByIdsAndUserId(ids, userId);
         if (ownedCount != ids.size()) {
             throw AppException.forbidden();
         }
 
-        for (ReorderRequest.ReorderItem item : request.getItems()) {
-            Task task = taskRepository.findByIdAndUserId(item.getId(), userId)
-                    .orElseThrow(() -> AppException.notFound(ErrorCode.RES_TASK_NOT_FOUND));
-            task.setPosition(item.getPosition());
-            taskRepository.save(task);
+        Map<UUID, Integer> positionMap = request.getItems().stream()
+                .collect(Collectors.toMap(
+                        ReorderRequest.ReorderItem::getId,
+                        ReorderRequest.ReorderItem::getPosition));
+
+        List<Task> tasks = taskRepository.findAllByIdInAndUserId(ids, userId);
+        for (Task task : tasks) {
+            task.setPosition(positionMap.get(task.getId()));
         }
+        taskRepository.saveAll(tasks);
 
         log.debug("Reorder applied for {} tasks by user={}", ids.size(), userId);
     }
-
-    // Soft delete / restore / hard delete
 
     @Override
     @Transactional
@@ -204,13 +192,12 @@ public class TaskServiceImpl implements TaskService {
         task.setDeleted(true);
         task.setDeletedAt(Instant.now());
 
-        // Cascade soft-delete to direct subtasks in the same transaction
         List<Task> subtasks = taskRepository.findActiveSubtasksByParentId(taskId);
         for (Task sub : subtasks) {
             sub.setDeleted(true);
             sub.setDeletedAt(Instant.now());
-            taskRepository.save(sub);
         }
+        taskRepository.saveAll(subtasks);
 
         Task saved = taskRepository.save(task);
         wsNotifier.notifyUser(userId, "tasks.deleted", TaskResponse.from(saved));
@@ -225,7 +212,7 @@ public class TaskServiceImpl implements TaskService {
         Task task   = findOwnedTask(taskId, userId);
 
         if (!task.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_TASK_NOT_FOUND, "Task is not in trash.");
+            throw AppException.badRequest(ErrorCode.VAL_TASK_NOT_IN_TRASH);
         }
 
         task.setDeleted(false);
@@ -243,16 +230,13 @@ public class TaskServiceImpl implements TaskService {
         Task task   = findOwnedTask(taskId, userId);
 
         if (!task.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_TASK_NOT_FOUND,
-                    "Move the task to trash before permanently deleting it.");
+            throw AppException.badRequest(ErrorCode.VAL_TASK_MUST_BE_TRASHED_FIRST);
         }
 
         taskRepository.delete(task);
         wsNotifier.notifyUser(userId, "tasks.deleted", taskId);
         log.debug("Task permanently deleted id={} user={}", taskId, userId);
     }
-
-    // Pomodoro integration
 
     @Override
     @Transactional
@@ -261,14 +245,11 @@ public class TaskServiceImpl implements TaskService {
 
         taskRepository.incrementActualMinutes(taskId, minutes);
 
-        // Push an update so clients refresh the task card's actual time display
         taskRepository.findById(taskId).ifPresent(task ->
                 wsNotifier.notifyUser(task.getUserId(), "tasks.updated", TaskResponse.from(task)));
 
         log.debug("Added {} actual minutes to task id={}", minutes, taskId);
     }
-
-    // Private helpers
 
     private Task buildTask(User user, TaskRequest request) {
         Task.TaskBuilder builder = Task.builder()
@@ -286,12 +267,9 @@ public class TaskServiceImpl implements TaskService {
 
         if (request.getParentTaskId() != null) {
             Task parent = findOwnedTask(request.getParentTaskId(), user.getId());
-
-            // Enforce max subtask depth — grandchildren are forbidden
             if (parent.getParentTask() != null) {
                 throw AppException.badRequest(ErrorCode.VAL_SUBTASK_DEPTH_EXCEEDED);
             }
-
             builder.parentTask(parent);
         }
 
@@ -302,7 +280,6 @@ public class TaskServiceImpl implements TaskService {
         if (request.getTitle() != null)           task.setTitle(request.getTitle().trim());
         if (request.getDescription() != null)     task.setDescription(request.getDescription());
         if (request.getStatus() != null) {
-            // Status change via full update also handles completedAt
             if (request.getStatus() == TaskStatus.DONE && task.getCompletedAt() == null) {
                 task.setCompletedAt(Instant.now());
             } else if (request.getStatus() != TaskStatus.DONE) {

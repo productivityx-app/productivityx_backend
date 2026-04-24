@@ -19,18 +19,26 @@ import java.util.UUID;
 @Slf4j
 public class JwtService {
 
+    private static final int MIN_SECRET_LENGTH = 64;
+
     @Value("${app.jwt.secret}")
     private String secret;
 
     @Value("${app.jwt.access-expiry-ms:900000}")
     private long accessExpiryMs;
 
-    // Cached once at startup — avoids re-deriving the key on every token op
     private SecretKey cachedSigningKey;
 
     @PostConstruct
     private void initSigningKey() {
+        if (secret == null || secret.length() < MIN_SECRET_LENGTH) {
+            throw new IllegalStateException(
+                    "JWT secret must be at least " + MIN_SECRET_LENGTH + " characters long. " +
+                    "Current length: " + (secret != null ? secret.length() : 0) + ". " +
+                    "Set app.jwt.secret in your environment variables.");
+        }
         this.cachedSigningKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        log.info("JWT signing key initialized successfully");
     }
 
     public String generateAccessToken(UUID userId, String email) {
