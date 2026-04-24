@@ -17,7 +17,6 @@ import java.util.UUID;
 @Repository
 public interface NoteRepository extends JpaRepository<Note, UUID> {
 
-    // Active notes (not deleted) — primary listing endpoint
     @Query("""
             SELECT n FROM Note n
             LEFT JOIN FETCH n.tags
@@ -27,7 +26,6 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             """)
     Page<Note> findActiveByUserId(@Param("userId") UUID userId, Pageable pageable);
 
-    // Filtered by tag
     @Query("""
             SELECT DISTINCT n FROM Note n
             LEFT JOIN FETCH n.tags t
@@ -41,7 +39,6 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             @Param("tagId") UUID tagId,
             Pageable pageable);
 
-    // Pinned-only filter
     @Query("""
             SELECT n FROM Note n
             LEFT JOIN FETCH n.tags
@@ -52,7 +49,6 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             """)
     Page<Note> findPinnedByUserId(@Param("userId") UUID userId, Pageable pageable);
 
-    // Trash — soft-deleted notes
     @Query("""
             SELECT n FROM Note n
             LEFT JOIN FETCH n.tags
@@ -62,7 +58,6 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             """)
     Page<Note> findDeletedByUserId(@Param("userId") UUID userId, Pageable pageable);
 
-    // Single note — ownership-aware lookup
     @Query("""
             SELECT n FROM Note n
             LEFT JOIN FETCH n.tags
@@ -70,7 +65,6 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             """)
     Optional<Note> findByIdAndUserId(@Param("id") UUID id, @Param("userId") UUID userId);
 
-    // Delta sync — all changes (including deleted) since a given timestamp
     @Query("""
             SELECT n FROM Note n
             LEFT JOIN FETCH n.tags
@@ -79,16 +73,23 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             """)
     List<Note> findChangedSince(@Param("userId") UUID userId, @Param("since") Instant since);
 
-    // Nightly trash purge — auto-delete notes trashed more than 30 days ago
     @Modifying
     @Query("DELETE FROM Note n WHERE n.deleted = true AND n.deletedAt < :cutoff")
     int purgeTrash(@Param("cutoff") Instant cutoff);
 
-    // Count active notes (used by AI context builder and home dashboard)
     @Query("SELECT COUNT(n) FROM Note n WHERE n.userId = :userId AND n.deleted = false")
     long countActiveByUserId(@Param("userId") UUID userId);
 
-    // Plain-text FTS fallback when PostgreSQL tsvector is unavailable (dev environment)
+    // Returns the title of the most recently edited active note — used for AI context
+    @Query("""
+            SELECT n.title FROM Note n
+            WHERE n.userId = :userId
+              AND n.deleted = false
+            ORDER BY n.updatedAt DESC
+            LIMIT 1
+            """)
+    Optional<String> findLastEditedTitleByUserId(@Param("userId") UUID userId);
+
     @Query("""
             SELECT n FROM Note n
             LEFT JOIN FETCH n.tags
