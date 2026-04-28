@@ -3,6 +3,8 @@ plugins {
     alias(libs.plugins.spring.boot)
     alias(libs.plugins.spring.deps)
     id "org.jetbrains.kotlin.plugin.spring" version '2.3.0'
+    id "org.owasp.dependencycheck" version "9.0.9"
+    id "org.sonarqube" version "5.1.0.4882"
 }
 
 group = 'com.productivityx'
@@ -22,6 +24,12 @@ repositories {
 dependencyManagement {
     imports {
         mavenBom("org.testcontainers:testcontainers-bom:${libs.versions.testcontainers.get()}")
+    }
+}
+
+dependencyCheck {
+    nvd {
+        apiKey = "b31bb0c9-1aa3-41ee-8bcf-257b51879125"
     }
 }
 

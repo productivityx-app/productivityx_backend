@@ -1,9 +1,11 @@
 package com.oussama_chatri.productivityx.core.exception;
 
 import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
@@ -18,16 +20,50 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
 
+    // Returns true when the client declared it only accepts text/event-stream.
+    // SSE endpoints set produces=TEXT_EVENT_STREAM_VALUE, so any exception thrown before
+    // or during streaming must be sent back as an SSE event — not JSON — otherwise Spring
+    // throws HttpMediaTypeNotAcceptableException on top of the original error.
+    private boolean isSseRequest(HttpServletRequest request) {
+        String accept = request.getHeader("Accept");
+        return accept != null && accept.contains(MediaType.TEXT_EVENT_STREAM_VALUE);
+    }
+
+    // Builds a minimal SSE error event without an ObjectMapper dependency.
+    // The payload is a JSON object matching the standard ApiResponse error shape so
+    // the Android client can parse it with its existing error-handling logic.
+    private ResponseEntity<SseEmitter> sseError(HttpStatus status, String errorCode, String message) {
+        SseEmitter emitter = new SseEmitter(0L);
+        try {
+            String safeMsg = message == null ? "" : message.replace("\"", "\\\"");
+            String payload  = "{\"success\":false,\"errorCode\":\"" + errorCode
+                    + "\",\"message\":\"" + safeMsg + "\"}";
+            emitter.send(SseEmitter.event().name("error").data(payload));
+        } catch (IOException ignored) {
+            // Client already disconnected
+        } finally {
+            emitter.complete();
+        }
+        return ResponseEntity.status(status)
+                .contentType(MediaType.TEXT_EVENT_STREAM)
+                .body(emitter);
+    }
+
     @ExceptionHandler(AppException.class)
-    public ResponseEntity<ApiResponse<Void>> handleAppException(AppException ex) {
+    public Object handleAppException(AppException ex, HttpServletRequest request) {
         log.warn("AppException [{}]: {}", ex.getErrorCode().getCode(), ex.getMessage());
+        if (isSseRequest(request)) {
+            return sseError(ex.getStatus(), ex.getErrorCode().getCode(), ex.getMessage());
+        }
         return ResponseEntity.status(ex.getStatus())
                 .body(ApiResponse.error(ex.getErrorCode().getCode(), ex.getMessage()));
     }
@@ -98,7 +134,7 @@ public class GlobalExceptionHandler {
                         ErrorCode.AUTH_ACCOUNT_INACTIVE.getMessage()));
     }
 
-    // CRITICAL: Never pass ex.getMessage() to the client — it can expose Spring internal state.
+    // Never pass ex.getMessage() to the client — it can expose Spring internal state.
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ApiResponse<Void>> handleAuthentication(AuthenticationException ex) {
         log.debug("AuthenticationException: {}", ex.getMessage());
@@ -125,8 +161,14 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<ApiResponse<Void>> handleGeneric(Exception ex) {
+    public Object handleGeneric(Exception ex, HttpServletRequest request) {
         log.error("Unhandled exception: {}", ex.getMessage(), ex);
+        if (isSseRequest(request)) {
+            return sseError(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    ErrorCode.GEN_INTERNAL_ERROR.getCode(),
+                    ErrorCode.GEN_INTERNAL_ERROR.getMessage());
+        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(ApiResponse.error(
                         ErrorCode.GEN_INTERNAL_ERROR.getCode(),
