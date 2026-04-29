@@ -6,7 +6,7 @@ import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.core.exception.ErrorCode;
 import com.oussama_chatri.productivityx.core.util.PageableUtils;
 import com.oussama_chatri.productivityx.core.util.SecurityUtils;
-import com.oussama_chatri.productivityx.features.ai.client.GeminiClient;
+import com.oussama_chatri.productivityx.features.ai.client.GroqClient;
 import com.oussama_chatri.productivityx.features.ai.dto.response.AiContext;
 import com.oussama_chatri.productivityx.features.ai.dto.request.ChatRequest;
 import com.oussama_chatri.productivityx.features.ai.dto.response.ConversationResponse;
@@ -43,10 +43,10 @@ public class AiServiceImpl implements AiService {
     private final UserPreferencesRepository preferencesRepository;
     private final SecurityUtils             securityUtils;
     private final PageableUtils             pageableUtils;
-    private final GeminiClient              geminiClient;
+    private final GroqClient                groqClient;
     private final AiContextBuilder          contextBuilder;
 
-    @Value("${app.gemini.model:gemini-2.0-flash}")
+    @Value("${app.groq.model:llama-3.3-70b-versatile}")
     private String defaultModel;
 
     @Override
@@ -56,7 +56,7 @@ public class AiServiceImpl implements AiService {
         Pageable pageable = pageableUtils.build(page, size);
         return pageableUtils.toPagedResponse(
                 conversationRepository.findActiveByUserId(userId, pageable)
-                                      .map(ConversationResponse::summary));
+                        .map(ConversationResponse::summary));
     }
 
     @Override
@@ -88,7 +88,6 @@ public class AiServiceImpl implements AiService {
     @Override
     public SseEmitter sendMessage(UUID conversationId, ChatRequest request) {
         UUID userId = securityUtils.currentUserId();
-        // Validate ownership before handing off to the async thread
         findOwnedConversation(conversationId, userId);
 
         SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
@@ -107,7 +106,7 @@ public class AiServiceImpl implements AiService {
             String model        = resolveModel(userId);
             String systemPrompt = buildSystemPrompt(userId);
 
-            List<GeminiClient.GeminiMessage> history = buildHistory(conversation);
+            List<GroqClient.GroqMessage> history = buildHistory(conversation);
 
             Message userMsg = messageRepository.save(Message.builder()
                     .conversation(conversation)
@@ -116,7 +115,7 @@ public class AiServiceImpl implements AiService {
                     .build());
             log.debug("User message persisted id={}", userMsg.getId());
 
-            String fullResponse = geminiClient.streamChat(model, systemPrompt, history,
+            String fullResponse = groqClient.streamChat(model, systemPrompt, history,
                     userMessage, emitter);
 
             String actionBlock = extractActionBlock(fullResponse);
@@ -207,15 +206,15 @@ public class AiServiceImpl implements AiService {
         );
     }
 
-    private List<GeminiClient.GeminiMessage> buildHistory(Conversation conversation) {
+    private List<GroqClient.GroqMessage> buildHistory(Conversation conversation) {
         List<Message> recent = messageRepository.findRecentByConversationId(
                 conversation.getId(), HISTORY_WINDOW);
         Collections.reverse(recent);
 
-        List<GeminiClient.GeminiMessage> history = new ArrayList<>();
+        List<GroqClient.GroqMessage> history = new ArrayList<>();
         for (Message msg : recent) {
-            String geminiRole = msg.getRole() == MessageRole.USER ? "user" : "model";
-            history.add(new GeminiClient.GeminiMessage(geminiRole, msg.getContent()));
+            String role = msg.getRole() == MessageRole.USER ? "user" : "assistant";
+            history.add(new GroqClient.GroqMessage(role, msg.getContent()));
         }
         return history;
     }
@@ -243,7 +242,7 @@ public class AiServiceImpl implements AiService {
                     User message: %s
                     """.formatted(firstMessage);
 
-            String title = geminiClient.completeChat(model, prompt);
+            String title = groqClient.completeChat(model, prompt);
             if (title != null && !title.isBlank()) {
                 conversation.setTitle(title.trim());
                 conversationRepository.save(conversation);
