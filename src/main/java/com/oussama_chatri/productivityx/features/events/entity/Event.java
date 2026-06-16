@@ -101,4 +101,13 @@ public class Event {
     @UpdateTimestamp
     @Column(name = "updated_at")
     private Instant updatedAt;
+
+    /**
+     * JPA optimistic locking column — prevents concurrent overwrites.
+     * Separate from the business `version` counter clients use for conflict UI.
+     */
+    @Version
+    @Column(name = "jpa_version", nullable = false)
+    @Builder.Default
+    private Long jpaVersion = 0L;
 }

@@ -116,6 +116,15 @@ public class Task {
     @Builder.Default
     private int version = 1;
 
+    /**
+     * JPA optimistic locking column — prevents concurrent overwrites.
+     * Separate from the business `version` counter clients use for conflict UI.
+     */
+    @Version
+    @Column(name = "jpa_version", nullable = false)
+    @Builder.Default
+    private Long jpaVersion = 0L;
+
     // Offline sync status — clients manage PENDING/SYNCING; server always writes SYNCED
     @Enumerated(EnumType.STRING)
     @Column(name = "sync_status", nullable = false, length = 10)

@@ -1,9 +1,15 @@
 package com.oussama_chatri.productivityx.core.exception;
 
 import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.notes.dto.response.NoteResponse;
+import com.oussama_chatri.productivityx.features.notes.service.MergeService;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
+import lombok.Builder;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -24,24 +30,75 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
 
-    // Returns true when the client declared it only accepts text/event-stream.
-    // SSE endpoints set produces=TEXT_EVENT_STREAM_VALUE, so any exception thrown before
-    // or during streaming must be sent back as an SSE event — not JSON — otherwise Spring
-    // throws HttpMediaTypeNotAcceptableException on top of the original error.
+    /**
+     * JPA optimistic lock conflict — two concurrent writes to the same entity.
+     * The 409 body includes:
+     *   - errorCode: "CONFLICT_VERSION"
+     *   - serverEntity: the current server copy (client avoids a separate GET)
+     *   - currentVersion: the version number the server is now at
+     */
+    @ExceptionHandler(VersionConflictException.class)
+    public ResponseEntity<ConflictResponse<NoteResponse>> handleVersionConflict(VersionConflictException ex) {
+        log.warn("Version conflict on note id={}", ex.getServerEntity().getId());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ConflictResponse.<NoteResponse>builder()
+                        .success(false)
+                        .errorCode("CONFLICT_VERSION")
+                        .message("The note was modified by another session. Refresh and retry.")
+                        .serverEntity(ex.getServerEntity())
+                        .currentVersion(ex.getServerEntity().getVersion())
+                        .build());
+    }
+
+    /**
+     * Three-way merge produced unresolvable overlapping edits.
+     * The 409 body includes:
+     *   - errorCode: "CONFLICT_MERGE"
+     *   - serverEntity: current server content for the client's merge UI
+     *   - conflictRegions: list of overlapping line ranges with both sides' text
+     */
+    @ExceptionHandler(MergeConflictException.class)
+    public ResponseEntity<MergeConflictResponse<NoteResponse>> handleMergeConflict(MergeConflictException ex) {
+        log.warn("Merge conflict on note id={} regions={}", ex.getServerEntity().getId(), ex.getConflicts().size());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(MergeConflictResponse.<NoteResponse>builder()
+                        .success(false)
+                        .errorCode("CONFLICT_MERGE")
+                        .message("Overlapping edits detected. Manual merge required.")
+                        .serverEntity(ex.getServerEntity())
+                        .conflictRegions(ex.getConflicts())
+                        .build());
+    }
+
+    /**
+     * fallback: catches any OptimisticLockingFailureException that bubbles up
+     * outside of NoteServiceImpl (e.g. from Task, Event, PomodoroSession updates
+     * before those services are individually updated to throw VersionConflictException).
+     * Returns a generic 409 without the serverEntity since we don't have the type here.
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ConflictResponse<Void>> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        log.warn("Optimistic lock failure: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ConflictResponse.<Void>builder()
+                        .success(false)
+                        .errorCode("CONFLICT_VERSION")
+                        .message("The resource was modified by another session. Refresh and retry.")
+                        .build());
+    }
+
     private boolean isSseRequest(HttpServletRequest request) {
         String accept = request.getHeader("Accept");
         return accept != null && accept.contains(MediaType.TEXT_EVENT_STREAM_VALUE);
     }
 
-    // Builds a minimal SSE error event without an ObjectMapper dependency.
-    // The payload is a JSON object matching the standard ApiResponse error shape so
-    // the Android client can parse it with its existing error-handling logic.
     private ResponseEntity<SseEmitter> sseError(HttpStatus status, String errorCode, String message) {
         SseEmitter emitter = new SseEmitter(0L);
         try {
@@ -50,7 +107,6 @@ public class GlobalExceptionHandler {
                     + "\",\"message\":\"" + safeMsg + "\"}";
             emitter.send(SseEmitter.event().name("error").data(payload));
         } catch (IOException ignored) {
-            // Client already disconnected
         } finally {
             emitter.complete();
         }
@@ -103,18 +159,12 @@ public class GlobalExceptionHandler {
                         "Required parameter '" + ex.getParameterName() + "' is missing."));
     }
 
-    /**
-     * Handles type conversion failures on request parameters — e.g. an invalid date format
-     * for an {@code @RequestParam @DateTimeFormat Instant} parameter.
-     */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ApiResponse<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
-        String paramName = ex.getName();
-        Object badValue = ex.getValue();
-        String message = "Invalid value '" + badValue + "' for parameter '" + paramName + "'.";
         return ResponseEntity.badRequest()
                 .body(ApiResponse.error(
-                        ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(), message));
+                        ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(),
+                        "Invalid value '" + ex.getValue() + "' for parameter '" + ex.getName() + "'."));
     }
 
     @ExceptionHandler(AccessDeniedException.class)
@@ -149,7 +199,6 @@ public class GlobalExceptionHandler {
                         ErrorCode.AUTH_ACCOUNT_INACTIVE.getMessage()));
     }
 
-    // Never pass ex.getMessage() to the client — it can expose Spring internal state.
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ApiResponse<Void>> handleAuthentication(AuthenticationException ex) {
         log.debug("AuthenticationException: {}", ex.getMessage());
@@ -188,5 +237,29 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error(
                         ErrorCode.GEN_INTERNAL_ERROR.getCode(),
                         ErrorCode.GEN_INTERNAL_ERROR.getMessage()));
+    }
+
+    // Conflict response DTOs (inner classes — no separate files needed)
+
+    @Getter
+    @Builder
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class ConflictResponse<T> {
+        private final boolean success;
+        private final String errorCode;
+        private final String message;
+        private final T serverEntity;
+        private final Integer currentVersion;
+    }
+
+    @Getter
+    @Builder
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class MergeConflictResponse<T> {
+        private final boolean success;
+        private final String errorCode;
+        private final String message;
+        private final T serverEntity;
+        private final List<MergeService.ConflictRegion> conflictRegions;
     }
 }

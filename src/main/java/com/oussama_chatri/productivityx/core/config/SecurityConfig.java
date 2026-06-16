@@ -1,10 +1,14 @@
 package com.oussama_chatri.productivityx.core.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.oussama_chatri.productivityx.core.filter.IdempotencyFilter;
+import com.oussama_chatri.productivityx.core.security.JwtAuthFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
@@ -23,8 +27,6 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import com.oussama_chatri.productivityx.core.security.JwtAuthFilter;
-
 import java.util.Arrays;
 import java.util.List;
 
@@ -33,8 +35,10 @@ import java.util.List;
 @RequiredArgsConstructor
 public class SecurityConfig {
 
-    private final JwtAuthFilter jwtAuthFilter;
+    private final JwtAuthFilter      jwtAuthFilter;
     private final UserDetailsService userDetailsService;
+    private final StringRedisTemplate redisTemplate;
+    private final ObjectMapper        objectMapper;
 
     @Value("${app.allowed-origins:http://localhost:8080}")
     private String allowedOrigins;
@@ -55,6 +59,17 @@ public class SecurityConfig {
             "/api/v1/auth/verify-forgot-otp",
             "/ws/**"
     };
+
+    /**
+     * IdempotencyFilter bean — instantiated here so Spring injects the
+     * correct Redis template and ObjectMapper instances. Registered as a servlet
+     * filter via addFilterAfter so it runs after JWT auth is complete (userId needed
+     * for the Redis key).
+     */
+    @Bean
+    public IdempotencyFilter idempotencyFilter() {
+        return new IdempotencyFilter(redisTemplate, objectMapper);
+    }
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -77,7 +92,10 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated())
                 .authenticationProvider(authenticationProvider())
+                // JwtAuthFilter runs first — sets SecurityContext with userId
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                // IdempotencyFilter runs after JWT — userId is available in SecurityContext
+                .addFilterAfter(idempotencyFilter(), JwtAuthFilter.class)
                 .build();
     }
 
@@ -86,7 +104,8 @@ public class SecurityConfig {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOrigins(Arrays.asList(allowedOrigins.split(",")));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept"));
+        // Expose Idempotency-Key as an allowed request header
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "Idempotency-Key"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

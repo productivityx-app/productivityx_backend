@@ -73,6 +73,27 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
             """)
     List<Note> findChangedSince(@Param("userId") UUID userId, @Param("since") Instant since);
 
+    /**
+     * Cursor-based delta sync for notes.
+     * Returns paginated notes modified after cursor position, ordered by (updated_at, id).
+     * Includes both active and deleted notes — clients filter by deleted flag.
+     */
+    @Query(value = """
+            SELECT n.* FROM notes n
+            WHERE n.user_id = :userId
+              AND n.updated_at >= :since
+              AND (n.updated_at > :cursorUpdatedAt
+                   OR (n.updated_at = :cursorUpdatedAt AND n.id::text > :cursorId::text))
+            ORDER BY n.updated_at ASC, n.id ASC
+            LIMIT :limitVal
+            """, nativeQuery = true)
+    List<Note> findChangedSinceCursor(
+            @Param("userId") UUID userId,
+            @Param("since") Instant since,
+            @Param("cursorUpdatedAt") Instant cursorUpdatedAt,
+            @Param("cursorId") UUID cursorId,
+            @Param("limitVal") int limitVal);
+
     @Modifying
     @Query("DELETE FROM Note n WHERE n.deleted = true AND n.deletedAt < :cutoff")
     int purgeTrash(@Param("cutoff") Instant cutoff);
@@ -80,7 +101,6 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
     @Query("SELECT COUNT(n) FROM Note n WHERE n.userId = :userId AND n.deleted = false")
     long countActiveByUserId(@Param("userId") UUID userId);
 
-    // Returns the title of the most recently edited active note — used for AI context
     @Query("""
             SELECT n.title FROM Note n
             WHERE n.userId = :userId

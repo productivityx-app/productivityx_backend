@@ -83,7 +83,6 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     @Query("SELECT t FROM Task t WHERE t.id = :id AND t.userId = :userId")
     Optional<Task> findByIdAndUserId(@Param("id") UUID id, @Param("userId") UUID userId);
 
-    // Batch load for reorder — eliminates N+1 in reorder()
     @Query("SELECT t FROM Task t WHERE t.id IN :ids AND t.userId = :userId")
     List<Task> findAllByIdInAndUserId(@Param("ids") List<UUID> ids, @Param("userId") UUID userId);
 
@@ -93,6 +92,26 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
             ORDER BY t.updatedAt ASC
             """)
     List<Task> findChangedSince(@Param("userId") UUID userId, @Param("since") Instant since);
+
+    /**
+     * Cursor-based delta sync for tasks.
+     * Paginates tasks modified after cursor position for stable sync pages.
+     */
+    @Query(value = """
+            SELECT t.* FROM tasks t
+            WHERE t.user_id = :userId
+              AND t.updated_at >= :since
+              AND (t.updated_at > :cursorUpdatedAt
+                   OR (t.updated_at = :cursorUpdatedAt AND t.id::text > :cursorId::text))
+            ORDER BY t.updated_at ASC, t.id ASC
+            LIMIT :limitVal
+            """, nativeQuery = true)
+    List<Task> findChangedSinceCursor(
+            @Param("userId") UUID userId,
+            @Param("since") Instant since,
+            @Param("cursorUpdatedAt") Instant cursorUpdatedAt,
+            @Param("cursorId") UUID cursorId,
+            @Param("limitVal") int limitVal);
 
     @Query("SELECT COUNT(t) FROM Task t WHERE t.userId = :userId AND t.deleted = false AND t.parentTask IS NULL")
     long countActiveByUserId(@Param("userId") UUID userId);

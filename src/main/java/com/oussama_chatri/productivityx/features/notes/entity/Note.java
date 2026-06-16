@@ -42,12 +42,10 @@ public class Note {
     @Builder.Default
     private String title = "";
 
-    // Raw Markdown content
     @Column(nullable = false, columnDefinition = "TEXT")
     @Builder.Default
     private String content = "";
 
-    // Stripped plain-text mirror for FTS and previews
     @Column(name = "plain_text_content", nullable = false, columnDefinition = "TEXT")
     @Builder.Default
     private String plainTextContent = "";
@@ -71,6 +69,16 @@ public class Note {
     @Column(name = "deleted_at")
     private Instant deletedAt;
 
+    /**
+     * JPA optimistic locking column — prevents concurrent overwrites.
+     * Separate from the business `version` counter clients use for conflict UI.
+     */
+    @Version
+    @Column(name = "jpa_version", nullable = false)
+    @Builder.Default
+    private Long jpaVersion = 0L;
+
+    // Client-visible mutation counter — incremented by NoteServiceImpl on every update
     @Column(nullable = false)
     @Builder.Default
     private int version = 1;

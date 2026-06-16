@@ -112,11 +112,29 @@ public interface PomodoroSessionRepository extends JpaRepository<PomodoroSession
             @Param("userId") UUID userId,
             @Param("since") Instant since);
 
-    // ── NEW: used by AiContextDataProviderImpl ────────────────────────────
+    /**
+     * Cursor-based delta sync for pomodoro sessions.
+     * Sessions are immutable, paginate by created_at instead of updated_at.
+     */
+    @Query(value = """
+            SELECT ps.* FROM pomodoro_sessions ps
+            WHERE ps.user_id = :userId
+              AND ps.created_at >= :since
+              AND (ps.created_at > :cursorUpdatedAt
+                   OR (ps.created_at = :cursorUpdatedAt AND ps.id::text > :cursorId::text))
+            ORDER BY ps.created_at ASC, ps.id ASC
+            LIMIT :limitVal
+            """, nativeQuery = true)
+    List<PomodoroSession> findCreatedSinceCursor(
+            @Param("userId") UUID userId,
+            @Param("since") Instant since,
+            @Param("cursorUpdatedAt") Instant cursorUpdatedAt,
+            @Param("cursorId") UUID cursorId,
+            @Param("limitVal") int limitVal);
 
     /**
      * Returns the title of the task linked to the user's currently active FOCUS session.
-     * Null when no session is running or the session has no linked task.
+     * Uses FETCH FIRST for JPQL compatibility.
      */
     @Query("""
             SELECT t.title FROM PomodoroSession s
@@ -124,14 +142,10 @@ public interface PomodoroSessionRepository extends JpaRepository<PomodoroSession
             WHERE s.userId = :userId
               AND s.type = 'FOCUS'
               AND s.endedAt IS NULL
-            LIMIT 1
+            ORDER BY s.startedAt DESC
             """)
     Optional<String> findCurrentFocusTaskTitle(@Param("userId") UUID userId);
 
-    /**
-     * Total actual focus seconds for all completed FOCUS sessions started on or after dayStart.
-     * Used to compute today's focus minutes for the AI context panel.
-     */
     @Query("""
             SELECT COALESCE(SUM(s.actualDurationSeconds), 0)
             FROM PomodoroSession s

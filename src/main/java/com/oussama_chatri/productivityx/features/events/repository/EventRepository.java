@@ -17,7 +17,6 @@ import java.util.UUID;
 @Repository
 public interface EventRepository extends JpaRepository<Event, UUID> {
 
-    // Range query — primary calendar view
     @Query("""
             SELECT e FROM Event e
             WHERE e.userId = :userId
@@ -31,7 +30,6 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             @Param("from") Instant from,
             @Param("to") Instant to);
 
-    // Paged list — used when no date range is provided
     @Query("""
             SELECT e FROM Event e
             WHERE e.userId = :userId
@@ -40,7 +38,6 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             """)
     Page<Event> findActiveByUserId(@Param("userId") UUID userId, Pageable pageable);
 
-    // Trash
     @Query("""
             SELECT e FROM Event e
             WHERE e.userId = :userId
@@ -49,11 +46,9 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             """)
     Page<Event> findDeletedByUserId(@Param("userId") UUID userId, Pageable pageable);
 
-    // Ownership-aware single lookup
     @Query("SELECT e FROM Event e WHERE e.id = :id AND e.userId = :userId")
     Optional<Event> findByIdAndUserId(@Param("id") UUID id, @Param("userId") UUID userId);
 
-    // All instances of a recurring series
     @Query("""
             SELECT e FROM Event e
             WHERE e.recurrenceParent.id = :parentId
@@ -62,7 +57,6 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             """)
     List<Event> findActiveInstancesByParentId(@Param("parentId") UUID parentId);
 
-    // Delta sync support
     @Query("""
             SELECT e FROM Event e
             WHERE e.userId = :userId AND e.updatedAt > :since
@@ -70,7 +64,26 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             """)
     List<Event> findChangedSince(@Param("userId") UUID userId, @Param("since") Instant since);
 
-    // AI context — upcoming events this week
+    /**
+     * Cursor-based delta sync for events.
+     * Stable pagination over updated_at + id for consistent sync pages.
+     */
+    @Query(value = """
+            SELECT e.* FROM events e
+            WHERE e.user_id = :userId
+              AND e.updated_at >= :since
+              AND (e.updated_at > :cursorUpdatedAt
+                   OR (e.updated_at = :cursorUpdatedAt AND e.id::text > :cursorId::text))
+            ORDER BY e.updated_at ASC, e.id ASC
+            LIMIT :limitVal
+            """, nativeQuery = true)
+    List<Event> findChangedSinceCursor(
+            @Param("userId") UUID userId,
+            @Param("since") Instant since,
+            @Param("cursorUpdatedAt") Instant cursorUpdatedAt,
+            @Param("cursorId") UUID cursorId,
+            @Param("limitVal") int limitVal);
+
     @Query("""
             SELECT COUNT(e) FROM Event e
             WHERE e.userId = :userId
@@ -83,7 +96,6 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             @Param("from") Instant from,
             @Param("to") Instant to);
 
-    // Home dashboard — today's events
     @Query("""
             SELECT e FROM Event e
             WHERE e.userId = :userId
@@ -97,7 +109,6 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             @Param("dayStart") Instant dayStart,
             @Param("dayEnd") Instant dayEnd);
 
-    // ILIKE fallback for dev environments without PostgreSQL FTS
     @Query("""
             SELECT e FROM Event e
             WHERE e.userId = :userId
@@ -108,7 +119,6 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
             """)
     Page<Event> searchFallback(@Param("userId") UUID userId, @Param("q") String q, Pageable pageable);
 
-    // Nightly trash purge
     @Modifying
     @Query("DELETE FROM Event e WHERE e.deleted = true AND e.deletedAt < :cutoff")
     int purgeTrash(@Param("cutoff") Instant cutoff);

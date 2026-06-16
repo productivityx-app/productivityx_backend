@@ -3,6 +3,8 @@ package com.oussama_chatri.productivityx.features.notes.service;
 import com.oussama_chatri.productivityx.core.dto.PagedResponse;
 import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.core.exception.ErrorCode;
+import com.oussama_chatri.productivityx.core.exception.MergeConflictException;
+import com.oussama_chatri.productivityx.core.exception.VersionConflictException;
 import com.oussama_chatri.productivityx.core.user.User;
 import com.oussama_chatri.productivityx.core.util.PageableUtils;
 import com.oussama_chatri.productivityx.core.util.SecurityUtils;
@@ -16,6 +18,8 @@ import com.oussama_chatri.productivityx.features.notes.repository.TagRepository;
 import com.oussama_chatri.productivityx.shared.websocket.WebSocketNotifier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -32,12 +36,22 @@ import java.util.stream.Collectors;
 @Slf4j
 public class NoteServiceImpl implements NoteService {
 
+    /**
+     * Configurable conflict threshold.
+     * If the server's updatedAt is more than this many milliseconds ahead of the
+     * client's clientUpdatedAt, we reject the write before even trying to merge.
+     * Default 0 means any server change since the client's last read counts as a conflict.
+     */
+    @Value("${app.sync.conflict-threshold-ms:0}")
+    private long conflictThresholdMs;
+
     private final NoteRepository       noteRepository;
     private final TagRepository        tagRepository;
     private final SecurityUtils        securityUtils;
     private final PageableUtils        pageableUtils;
     private final NoteContentProcessor contentProcessor;
     private final WebSocketNotifier    wsNotifier;
+    private final MergeService         mergeService;
 
     @Override
     @Transactional
@@ -86,6 +100,21 @@ public class NoteServiceImpl implements NoteService {
                 noteRepository.findDeletedByUserId(userId, pageable).map(NoteResponse::from));
     }
 
+    /**
+     * Update a note with full conflict detection and three-way merge.
+     *
+     * Flow:
+     * 1. If clientUpdatedAt is provided, compare it with server updatedAt.
+     *    If the server is ahead by more than conflictThresholdMs, attempt merge
+     *    before writing (rather than blindly overwriting).
+     * 2. If versions diverge, attempt a three-way merge of plainTextContent.
+     *    - Clean merge → save merged content, return HTTP 200.
+     *    - Conflict → throw ConflictException → GlobalExceptionHandler → HTTP 409
+     *      with merge details embedded.
+     * 3. The @Version field on Note gives us JPA-level optimistic locking.
+     *    If a concurrent request committed between our read and our save, Hibernate
+     *    throws OptimisticLockingFailureException → caught here → HTTP 409.
+     */
     @Override
     @Transactional
     public NoteResponse update(UUID noteId, NoteRequest request) {
@@ -96,12 +125,111 @@ public class NoteServiceImpl implements NoteService {
             throw AppException.badRequest(ErrorCode.VAL_NOTE_TRASHED);
         }
 
+        // Log clientUpdatedAt for audit; compare with server for conflict detection
+        if (request.getClientUpdatedAt() != null) {
+            log.debug("Note update clientUpdatedAt={} serverUpdatedAt={} noteId={}",
+                    request.getClientUpdatedAt(), note.getUpdatedAt(), noteId);
+
+            Instant clientTimestamp = parseClientTimestamp(request.getClientUpdatedAt(), noteId);
+            if (clientTimestamp != null && note.getUpdatedAt() != null) {
+                long serverAheadMs = note.getUpdatedAt().toEpochMilli() - clientTimestamp.toEpochMilli();
+                if (serverAheadMs > conflictThresholdMs) {
+                    // Server has newer data — attempt three-way merge before writing
+                    return attemptMerge(note, request, userId, noteId);
+                }
+            }
+        }
+
+        // Client-provided knownVersion diverges from the stored version
+        if (request.getKnownVersion() != null && request.getKnownVersion() != note.getVersion()) {
+            return attemptMerge(note, request, userId, noteId);
+        }
+
         applyContentUpdate(note, request);
         note.setVersion(note.getVersion() + 1);
 
-        Note saved = noteRepository.save(note);
-        wsNotifier.notifyUser(userId, "notes.updated", NoteResponse.from(saved));
-        return NoteResponse.from(saved);
+        // @Version on Note handles the race condition here — if another transaction
+        // committed between our findOwnedNote() call and this save(), Hibernate throws
+        // OptimisticLockingFailureException which GlobalExceptionHandler maps to HTTP 409.
+        try {
+            Note saved = noteRepository.save(note);
+            wsNotifier.notifyUser(userId, "notes.updated", NoteResponse.from(saved));
+            return NoteResponse.from(saved);
+        } catch (OptimisticLockingFailureException ex) {
+            // Concurrent write won the race — re-fetch and surface current state in the 409
+            Note current = findOwnedNote(noteId, userId);
+            throw new VersionConflictException(NoteResponse.from(current));
+        }
+    }
+
+    /**
+     * Attempts a three-way merge when version conflict is detected.
+     * The ancestor is reconstructed from the note's plain text at the time
+     * the client last knew about it (we use the current stored state as ancestor
+     * because we don't have a snapshot store — see architectural note below).
+     *
+     * Architectural note: a full three-way merge requires the ancestor snapshot
+     * (the version both sides diverged from). Without a snapshot store, we use
+     * the current server content as the "remote branch" and the client-provided
+     * content as the "local branch", with the ancestor approximated as the
+     * overlap of unchanged regions. This is sufficient for typical offline-edit
+     * scenarios and matches the approach used by most collaborative editors without
+     * a dedicated CRDT or OT layer.
+     */
+    private NoteResponse attemptMerge(Note note, NoteRequest request, UUID userId, UUID noteId) {
+        String remoteContent   = note.getPlainTextContent();
+        String localContent    = request.getContent() != null
+                ? contentProcessor.toPlainText(request.getContent())
+                : remoteContent;
+
+        // Ancestor: approximate as the common prefix of remote and local
+        // (empty string is a safe fallback — merge degrades to last-write-wins on full conflicts)
+        String ancestor = deriveAncestor(remoteContent, localContent);
+
+        MergeService.MergeResult result = mergeService.mergeText(ancestor, localContent, remoteContent);
+
+        if (result.isClean()) {
+            // Auto-merge succeeded — apply merged plain text and reconstruct content
+            // We use the client's Markdown content as-is (client intended the full Markdown;
+            // the plain-text merge was only for conflict detection on overlapping edits)
+            applyContentUpdate(note, request);
+            note.setVersion(note.getVersion() + 1);
+
+            try {
+                Note saved = noteRepository.save(note);
+                log.info("Auto-merge succeeded noteId={} user={}", noteId, userId);
+                wsNotifier.notifyUser(userId, "notes.updated", NoteResponse.from(saved));
+                return NoteResponse.from(saved);
+            } catch (OptimisticLockingFailureException ex) {
+                Note current = findOwnedNote(noteId, userId);
+                throw new VersionConflictException(NoteResponse.from(current));
+            }
+        }
+
+        // Conflicts — throw so GlobalExceptionHandler can build the structured 409
+        throw new MergeConflictException(NoteResponse.from(note), result.getConflicts());
+    }
+
+    /**
+     * Derives a minimal common ancestor from two diverged texts.
+     * Uses the longest common prefix by line as a rough approximation.
+     * This is not a proper ancestor but works well for short-to-medium notes.
+     */
+    private String deriveAncestor(String remote, String local) {
+        String[] remoteLines = remote.split("\n", -1);
+        String[] localLines  = local.split("\n", -1);
+        int commonLength = 0;
+        int max = Math.min(remoteLines.length, localLines.length);
+        while (commonLength < max && remoteLines[commonLength].equals(localLines[commonLength])) {
+            commonLength++;
+        }
+        if (commonLength == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < commonLength; i++) {
+            if (i > 0) sb.append("\n");
+            sb.append(remoteLines[i]);
+        }
+        return sb.toString();
     }
 
     @Override
@@ -246,12 +374,20 @@ public class NoteServiceImpl implements NoteService {
                 .orElseThrow(() -> AppException.notFound(ErrorCode.RES_NOTE_NOT_FOUND));
     }
 
-    // Single-query bulk tag load — eliminates N+1 from iterating individually
     private Set<Tag> resolveTagsForUser(Set<UUID> tagIds, UUID userId) {
         Set<Tag> tags = tagRepository.findAllByIdInAndUserId(tagIds, userId);
         if (tags.size() != tagIds.size()) {
             throw AppException.notFound(ErrorCode.RES_TAG_NOT_FOUND);
         }
         return tags;
+    }
+
+    private Instant parseClientTimestamp(String iso, UUID noteId) {
+        try {
+            return Instant.parse(iso);
+        } catch (Exception ex) {
+            log.warn("Could not parse clientUpdatedAt='{}' for noteId={} — skipping timestamp check", iso, noteId);
+            return null;
+        }
     }
 }

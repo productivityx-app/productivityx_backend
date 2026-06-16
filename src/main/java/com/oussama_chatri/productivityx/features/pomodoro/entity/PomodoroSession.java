@@ -84,4 +84,13 @@ public class PomodoroSession {
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private Instant createdAt;
+
+    /**
+     * JPA optimistic locking column — prevents concurrent overwrites.
+     * Separate from the business `version` counter clients use for conflict UI.
+     */
+    @Version
+    @Column(name = "jpa_version", nullable = false)
+    @Builder.Default
+    private Long jpaVersion = 0L;
 }

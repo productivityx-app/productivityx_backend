@@ -6,5 +6,5 @@ import java.time.Instant;
 
 public interface SyncService {
 
-    DeltaSyncResponse delta(Instant since);
+    DeltaSyncResponse delta(Instant since, String cursor, int limit);
 }
