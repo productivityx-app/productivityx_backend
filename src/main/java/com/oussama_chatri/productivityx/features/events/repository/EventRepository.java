@@ -122,4 +122,23 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
     @Modifying
     @Query("DELETE FROM Event e WHERE e.deleted = true AND e.deletedAt < :cutoff")
     int purgeTrash(@Param("cutoff") Instant cutoff);
+
+    /**
+     * Hard-deletes up to 500 trashed events older than the cutoff, returning the
+     * purged (id, user_id) pairs. Used by CleanupScheduler for batch processing
+     * — call in a loop until zero rows are returned.
+     *
+     * <p>Uses a CTE with LIMIT to cap each DELETE to a predictable batch size,
+     * preventing long-running transactions on large trash backlogs.
+     */
+    @Query(value = """
+            WITH batch AS (
+                SELECT id FROM events
+                WHERE is_deleted = true AND deleted_at < :cutoff
+                LIMIT 500
+            )
+            DELETE FROM events WHERE id IN (SELECT id FROM batch)
+            RETURNING id, user_id
+            """, nativeQuery = true)
+    List<Object[]> purgeTrashReturning(@Param("cutoff") Instant cutoff);
 }

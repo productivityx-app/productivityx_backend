@@ -98,6 +98,25 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
     @Query("DELETE FROM Note n WHERE n.deleted = true AND n.deletedAt < :cutoff")
     int purgeTrash(@Param("cutoff") Instant cutoff);
 
+    /**
+     * Hard-deletes up to 500 trashed notes older than the cutoff, returning the
+     * purged (id, user_id) pairs. Used by CleanupScheduler for batch processing
+     * — call in a loop until zero rows are returned.
+     *
+     * <p>Uses a CTE with LIMIT to cap each DELETE to a predictable batch size,
+     * preventing long-running transactions on large trash backlogs.
+     */
+    @Query(value = """
+            WITH batch AS (
+                SELECT id FROM notes
+                WHERE is_deleted = true AND deleted_at < :cutoff
+                LIMIT 500
+            )
+            DELETE FROM notes WHERE id IN (SELECT id FROM batch)
+            RETURNING id, user_id
+            """, nativeQuery = true)
+    List<Object[]> purgeTrashReturning(@Param("cutoff") Instant cutoff);
+
     @Query("SELECT COUNT(n) FROM Note n WHERE n.userId = :userId AND n.deleted = false")
     long countActiveByUserId(@Param("userId") UUID userId);
 

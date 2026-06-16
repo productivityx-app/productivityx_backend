@@ -14,6 +14,7 @@ import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -32,6 +33,7 @@ import java.util.List;
 
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity // Enables @PreAuthorize, @PostAuthorize, @Secured
 @RequiredArgsConstructor
 public class SecurityConfig {
 
@@ -90,6 +92,8 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(PUBLIC_ENDPOINTS).permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        // Admin endpoints require ADMIN authority
+                        .requestMatchers("/api/v1/admin/**").hasAuthority("ADMIN")
                         .anyRequest().authenticated())
                 .authenticationProvider(authenticationProvider())
                 // JwtAuthFilter runs first — sets SecurityContext with userId

@@ -169,4 +169,23 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     @Modifying
     @Query("DELETE FROM Task t WHERE t.deleted = true AND t.deletedAt < :cutoff")
     int purgeTrash(@Param("cutoff") Instant cutoff);
+
+    /**
+     * Hard-deletes up to 500 trashed tasks older than the cutoff, returning the
+     * purged (id, user_id) pairs. Used by CleanupScheduler for batch processing
+     * — call in a loop until zero rows are returned.
+     *
+     * <p>Uses a CTE with LIMIT to cap each DELETE to a predictable batch size,
+     * preventing long-running transactions on large trash backlogs.
+     */
+    @Query(value = """
+            WITH batch AS (
+                SELECT id FROM tasks
+                WHERE is_deleted = true AND deleted_at < :cutoff
+                LIMIT 500
+            )
+            DELETE FROM tasks WHERE id IN (SELECT id FROM batch)
+            RETURNING id, user_id
+            """, nativeQuery = true)
+    List<Object[]> purgeTrashReturning(@Param("cutoff") Instant cutoff);
 }

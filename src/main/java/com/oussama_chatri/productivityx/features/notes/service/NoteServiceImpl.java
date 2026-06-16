@@ -5,6 +5,7 @@ import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.core.exception.ErrorCode;
 import com.oussama_chatri.productivityx.core.exception.MergeConflictException;
 import com.oussama_chatri.productivityx.core.exception.VersionConflictException;
+import com.oussama_chatri.productivityx.core.locking.AdvisoryLockService;
 import com.oussama_chatri.productivityx.core.user.User;
 import com.oussama_chatri.productivityx.core.util.PageableUtils;
 import com.oussama_chatri.productivityx.core.util.SecurityUtils;
@@ -52,6 +53,7 @@ public class NoteServiceImpl implements NoteService {
     private final NoteContentProcessor contentProcessor;
     private final WebSocketNotifier    wsNotifier;
     private final MergeService         mergeService;
+    private final AdvisoryLockService  advisoryLockService;
 
     @Override
     @Transactional
@@ -101,25 +103,32 @@ public class NoteServiceImpl implements NoteService {
     }
 
     /**
-     * Update a note with full conflict detection and three-way merge.
+     * Update a note with full conflict detection, advisory locking, and three-way merge.
      *
-     * Flow:
-     * 1. If clientUpdatedAt is provided, compare it with server updatedAt.
-     *    If the server is ahead by more than conflictThresholdMs, attempt merge
-     *    before writing (rather than blindly overwriting).
-     * 2. If versions diverge, attempt a three-way merge of plainTextContent.
-     *    - Clean merge → save merged content, return HTTP 200.
-     *    - Conflict → throw ConflictException → GlobalExceptionHandler → HTTP 409
-     *      with merge details embedded.
-     * 3. The @Version field on Note gives us JPA-level optimistic locking.
-     *    If a concurrent request committed between our read and our save, Hibernate
-     *    throws OptimisticLockingFailureException → caught here → HTTP 409.
+     * <p>Flow:
+     * <ol>
+     *   <li>Acquire a PostgreSQL transaction-scoped advisory lock on (userId, noteId)
+     *       to serialize concurrent edits from the same user across devices.</li>
+     *   <li>If clientUpdatedAt is provided, compare it with server updatedAt.
+     *       If the server is ahead by more than conflictThresholdMs, attempt merge.</li>
+     *   <li>If versions diverge, attempt a three-way merge of plainTextContent.
+     *       Clean merge → save merged content, return HTTP 200.
+     *       Conflict → throw ConflictException → GlobalExceptionHandler → HTTP 409.</li>
+     *   <li>The @Version field on Note gives us JPA optimistic locking as a final guard.
+     *       If a concurrent request committed between our read and save, Hibernate throws
+     *       OptimisticLockingFailureException → caught here → HTTP 409.</li>
+     * </ol>
      */
     @Override
     @Transactional
     public NoteResponse update(UUID noteId, NoteRequest request) {
         UUID userId = securityUtils.currentUserId();
-        Note note   = findOwnedNote(noteId, userId);
+
+        // Acquire transaction-scoped advisory lock — serializes concurrent edits
+        // from the same user across multiple devices. Auto-released on TX commit/rollback.
+        advisoryLockService.acquireNoteLock(userId, noteId);
+
+        Note note = findOwnedNote(noteId, userId);
 
         if (note.isDeleted()) {
             throw AppException.badRequest(ErrorCode.VAL_NOTE_TRASHED);
