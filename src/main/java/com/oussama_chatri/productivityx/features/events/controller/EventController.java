@@ -10,12 +10,13 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
@@ -46,22 +47,22 @@ public class EventController {
 
     @GetMapping
     @Operation(summary = "List events",
-               description = "Pass 'from' and 'to' (ISO-8601 UTC) for a calendar range query. " +
+               description = "Pass 'from' and 'to' (ISO-8601 UTC or date-only) for a calendar range query. " +
                              "Omit both for a paged listing ordered by startAt.")
     public ResponseEntity<ApiResponse<?>> list(
-            @Parameter(description = "Range start — ISO-8601 UTC, e.g. 2026-04-01T00:00:00Z")
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
-            Instant from,
+            @Parameter(description = "Range start — ISO-8601 UTC (e.g. 2026-04-01T00:00:00Z) or date-only (e.g. 2026-04-01)")
+            @RequestParam(required = false) String from,
 
-            @Parameter(description = "Range end — ISO-8601 UTC, e.g. 2026-04-30T23:59:59Z")
-            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
-            Instant to,
+            @Parameter(description = "Range end — ISO-8601 UTC (e.g. 2026-04-30T23:59:59Z) or date-only (e.g. 2026-04-30)")
+            @RequestParam(required = false) String to,
 
             @RequestParam(defaultValue = "0")  int page,
             @RequestParam(defaultValue = "50") int size) {
 
         if (from != null && to != null) {
-            List<EventResponse> events = eventService.listByRange(from, to);
+            Instant fromInstant = parseInstant(from);
+            Instant toInstant = parseInstant(to);
+            List<EventResponse> events = eventService.listByRange(fromInstant, toInstant);
             return ResponseEntity.ok(ApiResponse.ok(events));
         }
 
@@ -115,5 +116,17 @@ public class EventController {
     public ResponseEntity<ApiResponse<Void>> deleteSeries(@PathVariable UUID id) {
         eventService.deleteSeriesFromParent(id);
         return ResponseEntity.ok(ApiResponse.message("Recurring series deleted."));
+    }
+
+    /**
+     * Parses an Instant from a string that may be either:
+     * - Full ISO-8601 datetime: 2026-04-01T00:00:00Z
+     * - Date-only: 2026-04-01 (assumes start of day UTC)
+     */
+    private Instant parseInstant(String value) {
+        if (value.contains("T")) {
+            return Instant.parse(value);
+        }
+        return LocalDate.parse(value).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 }

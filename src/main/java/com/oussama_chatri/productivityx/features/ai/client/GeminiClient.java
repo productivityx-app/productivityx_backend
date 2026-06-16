@@ -20,21 +20,21 @@ import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
-public class GroqClient {
+public class GeminiClient {
 
-    private static final String GROQ_BASE    = "https://api.groq.com/openai/v1/chat/completions";
-    private static final MediaType JSON_TYPE  = MediaType.get("application/json; charset=utf-8");
+    private static final String BASE_URL  = "https://generativelanguage.googleapis.com/v1beta/models/";
+    private static final MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
 
     private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    @Value("${app.groq.api-key}")
+    @Value("${app.gemini.api-key}")
     private String apiKey;
 
-    @Value("${app.groq.model:llama-3.3-70b-versatile}")
+    @Value("${app.gemini.model:gemini-2.0-flash}")
     private String defaultModel;
 
-    public GroqClient() {
+    public GeminiClient() {
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(120, TimeUnit.SECONDS)
@@ -48,13 +48,14 @@ public class GroqClient {
      * Returns the full assembled response string once the stream completes.
      */
     public String streamChat(String model, String systemPrompt,
-                             List<GroqMessage> history, String userMessage,
+                             List<GeminiMessage> history, String userMessage,
                              SseEmitter emitter) {
-        String body = buildRequestBody(model, systemPrompt, history, userMessage, true);
+
+        String url  = BASE_URL + model + ":streamGenerateContent?alt=sse&key=" + apiKey;
+        String body = buildRequestBody(systemPrompt, history, userMessage);
 
         Request request = new Request.Builder()
-                .url(GROQ_BASE)
-                .addHeader("Authorization", "Bearer " + apiKey)
+                .url(url)
                 .addHeader("Accept", "text/event-stream")
                 .post(RequestBody.create(body, JSON_TYPE))
                 .build();
@@ -64,7 +65,7 @@ public class GroqClient {
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful() || response.body() == null) {
                 String errorBody = response.body() != null ? response.body().string() : "empty";
-                log.error("Groq API error status={} body={}", response.code(), errorBody);
+                log.error("Gemini API error status={} body={}", response.code(), errorBody);
                 throw AppException.internal(ErrorCode.EXT_AI_UNAVAILABLE);
             }
 
@@ -95,7 +96,7 @@ public class GroqClient {
             emitter.complete();
 
         } catch (IOException ex) {
-            log.error("Groq stream IO error: {}", ex.getMessage());
+            log.error("Gemini stream IO error: {}", ex.getMessage());
             try { emitter.completeWithError(ex); } catch (Exception ignored) {}
             throw AppException.internal(ErrorCode.EXT_AI_STREAM_ERROR);
         }
@@ -107,11 +108,11 @@ public class GroqClient {
      * Blocking single-turn completion — used for auto-generating conversation titles.
      */
     public String completeChat(String model, String prompt) {
-        String body = buildRequestBody(model, null, List.of(), prompt, false);
+        String url  = BASE_URL + model + ":generateContent?key=" + apiKey;
+        String body = buildRequestBody(null, List.of(), prompt);
 
         Request request = new Request.Builder()
-                .url(GROQ_BASE)
-                .addHeader("Authorization", "Bearer " + apiKey)
+                .url(url)
                 .post(RequestBody.create(body, JSON_TYPE))
                 .build();
 
@@ -122,44 +123,49 @@ public class GroqClient {
             JsonNode node  = objectMapper.readTree(response.body().string());
             String   token = extractCompletionToken(node);
             if (token == null) {
-                log.warn("Groq completeChat returned null token for model={}", model);
+                log.warn("Gemini completeChat returned null token for model={}", model);
             }
             return token;
         } catch (IOException ex) {
-            log.error("Groq complete error: {}", ex.getMessage());
+            log.error("Gemini complete error: {}", ex.getMessage());
             throw AppException.internal(ErrorCode.EXT_AI_UNAVAILABLE);
         }
     }
 
-    private String buildRequestBody(String model, String systemPrompt,
-                                    List<GroqMessage> history, String userMessage,
-                                    boolean stream) {
+    private String buildRequestBody(String systemPrompt,
+                                    List<GeminiMessage> history,
+                                    String userMessage) {
         try {
-            ObjectNode body     = objectMapper.createObjectNode();
-            ArrayNode  messages = body.putArray("messages");
+            ObjectNode root = objectMapper.createObjectNode();
 
+            // System instruction — Gemini supports this as a top-level field
             if (systemPrompt != null && !systemPrompt.isBlank()) {
-                ObjectNode sys = messages.addObject();
-                sys.put("role", "system");
-                sys.put("content", systemPrompt);
+                ObjectNode systemInstruction = root.putObject("system_instruction");
+                ArrayNode  sysParts          = systemInstruction.putArray("parts");
+                sysParts.addObject().put("text", systemPrompt);
             }
 
-            for (GroqMessage msg : history) {
-                ObjectNode turn = messages.addObject();
-                turn.put("role", msg.role());
-                turn.put("content", msg.content());
+            // Conversation history + current user message
+            ArrayNode contents = root.putArray("contents");
+
+            for (GeminiMessage msg : history) {
+                ObjectNode turn  = contents.addObject();
+                turn.put("role", msg.role()); // "user" or "model"
+                ArrayNode parts  = turn.putArray("parts");
+                parts.addObject().put("text", msg.content());
             }
 
-            ObjectNode userTurn = messages.addObject();
+            ObjectNode userTurn  = contents.addObject();
             userTurn.put("role", "user");
-            userTurn.put("content", userMessage);
+            ArrayNode userParts  = userTurn.putArray("parts");
+            userParts.addObject().put("text", userMessage);
 
-            body.put("model", model);
-            body.put("temperature", 0.7);
-            body.put("max_tokens", 2048);
-            body.put("stream", stream);
+            // Generation config
+            ObjectNode generationConfig = root.putObject("generationConfig");
+            generationConfig.put("temperature", 0.7);
+            generationConfig.put("maxOutputTokens", 2048);
 
-            return body.toString();
+            return root.toString();
         } catch (Exception ex) {
             throw AppException.internal(ErrorCode.EXT_AI_UNAVAILABLE);
         }
@@ -167,10 +173,12 @@ public class GroqClient {
 
     private String extractStreamToken(JsonNode node) {
         try {
-            return node.path("choices")
+            return node.path("candidates")
                     .path(0)
-                    .path("delta")
                     .path("content")
+                    .path("parts")
+                    .path(0)
+                    .path("text")
                     .asText(null);
         } catch (Exception ex) {
             log.debug("Stream token extraction failed: {}", node);
@@ -180,10 +188,12 @@ public class GroqClient {
 
     private String extractCompletionToken(JsonNode node) {
         try {
-            return node.path("choices")
+            return node.path("candidates")
                     .path(0)
-                    .path("message")
                     .path("content")
+                    .path("parts")
+                    .path(0)
+                    .path("text")
                     .asText(null);
         } catch (Exception ex) {
             log.debug("Completion token extraction failed: {}", node);
@@ -191,5 +201,5 @@ public class GroqClient {
         }
     }
 
-    public record GroqMessage(String role, String content) {}
+    public record GeminiMessage(String role, String content) {}
 }

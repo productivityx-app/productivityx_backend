@@ -28,8 +28,10 @@ import java.util.stream.Collectors;
 @Slf4j
 public class SyncServiceImpl implements SyncService {
 
-    // Prevent loading the entire history when a client passes a very old timestamp
-    private static final int MAX_SYNC_RANGE_DAYS = 30;
+    // Prevent loading the entire history when a client passes a very old timestamp.
+    // 365 days allows first-time sync to pull a full year of data while still
+    // protecting against unbounded queries.
+    private static final int MAX_SYNC_RANGE_DAYS = 365;
 
     private final NoteRepository            noteRepository;
     private final TaskRepository            taskRepository;

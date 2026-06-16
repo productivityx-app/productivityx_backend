@@ -45,6 +45,19 @@ public class RateLimiterService {
                 ErrorCode.RATE_OTP_EXCEEDED);
     }
 
+    /**
+     * Clears the login rate-limit counter for the given IP.
+     * Called after a successful login so the user starts fresh on their next session.
+     */
+    public void resetLoginLimit(String ip) {
+        if (ip == null || ip.isBlank()) return;
+        try {
+            redis.delete("rl:login:" + ip);
+        } catch (Exception ex) {
+            log.debug("Failed to reset login rate limit for ip={}: {}", ip, ex.getMessage());
+        }
+    }
+
     private void check(String key, int maxAttempts, long windowSecs, ErrorCode errorCode) {
         Long count = redis.opsForValue().increment(key);
         if (count == null) {

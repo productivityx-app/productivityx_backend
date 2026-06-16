@@ -20,6 +20,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -100,6 +101,20 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error(
                         ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(),
                         "Required parameter '" + ex.getParameterName() + "' is missing."));
+    }
+
+    /**
+     * Handles type conversion failures on request parameters — e.g. an invalid date format
+     * for an {@code @RequestParam @DateTimeFormat Instant} parameter.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiResponse<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        String paramName = ex.getName();
+        Object badValue = ex.getValue();
+        String message = "Invalid value '" + badValue + "' for parameter '" + paramName + "'.";
+        return ResponseEntity.badRequest()
+                .body(ApiResponse.error(
+                        ErrorCode.VAL_REQUEST_BODY_INVALID.getCode(), message));
     }
 
     @ExceptionHandler(AccessDeniedException.class)

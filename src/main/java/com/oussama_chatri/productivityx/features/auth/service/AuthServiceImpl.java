@@ -244,6 +244,10 @@ public class AuthServiceImpl implements AuthService {
         user.setLastLoginAt(Instant.now());
         userRepository.save(user);
 
+        // Clear rate-limit counter on successful login so the user can
+        // re-authenticate (e.g. from another device) without being blocked.
+        rateLimiterService.resetLoginLimit(ip);
+
         auditService.log(AuditEvent.LOGIN_SUCCESS, user.getId(), ip);
         return tokenService.issueTokenPair(user, ip, httpRequest.getHeader("User-Agent"), response);
     }
@@ -360,6 +364,8 @@ public class AuthServiceImpl implements AuthService {
 
         User user = token.getUser();
         user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+        user.setFailedLoginCount(0);
+        user.setLockedUntil(null);
         userRepository.save(user);
 
         tokenService.revokeAllRefreshTokens(user.getId());
@@ -381,6 +387,8 @@ public class AuthServiceImpl implements AuthService {
         }
 
         user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
+        user.setFailedLoginCount(0);
+        user.setLockedUntil(null);
         userRepository.save(user);
 
         tokenService.revokeAllRefreshTokens(user.getId());

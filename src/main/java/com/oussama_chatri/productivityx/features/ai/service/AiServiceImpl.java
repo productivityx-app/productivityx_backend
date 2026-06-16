@@ -6,7 +6,7 @@ import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.core.exception.ErrorCode;
 import com.oussama_chatri.productivityx.core.util.PageableUtils;
 import com.oussama_chatri.productivityx.core.util.SecurityUtils;
-import com.oussama_chatri.productivityx.features.ai.client.GroqClient;
+import com.oussama_chatri.productivityx.features.ai.client.GeminiClient;
 import com.oussama_chatri.productivityx.features.ai.dto.response.AiContext;
 import com.oussama_chatri.productivityx.features.ai.dto.request.ChatRequest;
 import com.oussama_chatri.productivityx.features.ai.dto.response.ConversationResponse;
@@ -43,10 +43,10 @@ public class AiServiceImpl implements AiService {
     private final UserPreferencesRepository preferencesRepository;
     private final SecurityUtils             securityUtils;
     private final PageableUtils             pageableUtils;
-    private final GroqClient                groqClient;
+    private final GeminiClient              geminiClient;
     private final AiContextBuilder          contextBuilder;
 
-    @Value("${app.groq.model:llama-3.3-70b-versatile}")
+    @Value("${app.gemini.model:gemini-2.0-flash}")
     private String defaultModel;
 
     @Override
@@ -106,7 +106,7 @@ public class AiServiceImpl implements AiService {
             String model        = resolveModel(userId);
             String systemPrompt = buildSystemPrompt(userId);
 
-            List<GroqClient.GroqMessage> history = buildHistory(conversation);
+            List<GeminiClient.GeminiMessage> history = buildHistory(conversation);
 
             Message userMsg = messageRepository.save(Message.builder()
                     .conversation(conversation)
@@ -115,7 +115,7 @@ public class AiServiceImpl implements AiService {
                     .build());
             log.debug("User message persisted id={}", userMsg.getId());
 
-            String fullResponse = groqClient.streamChat(model, systemPrompt, history,
+            String fullResponse = geminiClient.streamChat(model, systemPrompt, history,
                     userMessage, emitter);
 
             String actionBlock = extractActionBlock(fullResponse);
@@ -180,14 +180,14 @@ public class AiServiceImpl implements AiService {
 
         return """
                 You are the built-in AI assistant for ProductivityX.
-                
+
                 The user's current workspace state:
                 - Active tasks: %d (%d due today, %d overdue)
                 - Upcoming events this week: %d
                 - Last note edited: "%s"
                 - Current Pomodoro task: %s
                 - Today's focus time logged: %d min
-                
+
                 Be concise and direct. Use this context to give relevant, personalised answers.
                 When the user asks to create or modify workspace items, include a structured
                 action block in your response using this exact format (one per line, no markdown):
@@ -206,15 +206,15 @@ public class AiServiceImpl implements AiService {
         );
     }
 
-    private List<GroqClient.GroqMessage> buildHistory(Conversation conversation) {
+    private List<GeminiClient.GeminiMessage> buildHistory(Conversation conversation) {
         List<Message> recent = messageRepository.findRecentByConversationId(
                 conversation.getId(), HISTORY_WINDOW);
         Collections.reverse(recent);
 
-        List<GroqClient.GroqMessage> history = new ArrayList<>();
+        List<GeminiClient.GeminiMessage> history = new ArrayList<>();
         for (Message msg : recent) {
-            String role = msg.getRole() == MessageRole.USER ? "user" : "assistant";
-            history.add(new GroqClient.GroqMessage(role, msg.getContent()));
+            String role = msg.getRole() == MessageRole.USER ? "user" : "model";
+            history.add(new GeminiClient.GeminiMessage(role, msg.getContent()));
         }
         return history;
     }
@@ -238,11 +238,11 @@ public class AiServiceImpl implements AiService {
                     Generate a short, descriptive title (max 6 words) for an AI conversation
                     that starts with this user message. Return only the title, no quotes,
                     no punctuation at the end.
-                    
+
                     User message: %s
                     """.formatted(firstMessage);
 
-            String title = groqClient.completeChat(model, prompt);
+            String title = geminiClient.completeChat(model, prompt);
             if (title != null && !title.isBlank()) {
                 conversation.setTitle(title.trim());
                 conversationRepository.save(conversation);
