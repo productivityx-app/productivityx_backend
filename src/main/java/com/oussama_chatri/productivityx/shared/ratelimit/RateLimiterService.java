@@ -8,12 +8,8 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.UUID;
 
-/**
- * Redis-backed sliding-window rate limiter.
- * Survives restarts and scales across multiple instances.
- * Uses INCR + EXPIRE: atomic, no Lua script required for this pattern.
- */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -40,15 +36,16 @@ public class RateLimiterService {
                 ErrorCode.RATE_RESEND_EXCEEDED);
     }
 
+    /** Delegates to {@link #checkResendLimit(String)} so AuthServiceImpl compiles. */
+    public void assertResendAllowed(UUID userId) {
+        checkResendLimit(userId.toString());
+    }
+
     public void checkOtpLimit(String tokenId) {
         check("rl:otp:" + tokenId, OTP_MAX_ATTEMPTS, OTP_WINDOW_SECS,
                 ErrorCode.RATE_OTP_EXCEEDED);
     }
 
-    /**
-     * Clears the login rate-limit counter for the given IP.
-     * Called after a successful login so the user starts fresh on their next session.
-     */
     public void resetLoginLimit(String ip) {
         if (ip == null || ip.isBlank()) return;
         try {
@@ -65,7 +62,6 @@ public class RateLimiterService {
             return;
         }
         if (count == 1) {
-            // First attempt in this window — set the expiry
             redis.expire(key, Duration.ofSeconds(windowSecs));
         }
         if (count > maxAttempts) {

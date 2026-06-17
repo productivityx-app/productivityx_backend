@@ -2,44 +2,66 @@ package com.oussama_chatri.productivityx.shared.websocket;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.util.UUID;
 
 /**
- * Thin wrapper around SimpMessagingTemplate.
- * <p>
- * Features inject this component when they need to push real-time events to a specific user.
- * Client subscribes to: {@code /user/{userId}/queue/{topic}}
- * <p>
- * Topics used in this project:
- * <ul>
- *   <li>notes.created / notes.updated / notes.deleted / notes.restored</li>
- *   <li>tasks.created / tasks.updated / tasks.deleted / tasks.restored</li>
- *   <li>events.created / events.updated / events.deleted / events.restored</li>
- *   <li>pomodoro.started / pomodoro.completed / pomodoro.interrupted</li>
- *   <li>sync.delta</li>
- * </ul>
+ * WebSocket push gateway. Every outbound message is wrapped in {@link WsPayload}
+ * with a unique messageId for client-side deduplication. Redis tracks recently
+ * sent IDs server-side (5-min TTL) as a defensive guard against duplicate sends.
  */
 @Component
 @RequiredArgsConstructor
 @Slf4j
 public class WebSocketNotifier {
 
-    private final SimpMessagingTemplate messagingTemplate;
+    private static final String WS_DEDUP_PREFIX = "ws:dedup:";
+    private static final Duration DEDUP_TTL = Duration.ofMinutes(5);
 
-    public void notifyUser(UUID userId, String topic, Object payload) {
-        String destination = "/queue/" + topic;
-        try {
-            messagingTemplate.convertAndSendToUser(userId.toString(), destination, payload);
-            log.debug("WS push → user={} topic={}", userId, topic);
-        } catch (Exception ex) {
-            log.error("WS push failed → user={} topic={}: {}", userId, topic, ex.getMessage());
+    private final SimpMessagingTemplate messagingTemplate;
+    private final StringRedisTemplate redisTemplate;
+
+    /**
+     * Sends a typed payload to the user's personal queue.
+     * The payload is wrapped in WsPayload which carries a unique messageId.
+     * Clients should maintain a sliding window of the last 100-200 seen IDs
+     * and silently drop duplicates.
+     */
+    public <T> void notifyUser(UUID userId, String topic, T payload) {
+        WsPayload<T> wrapped = WsPayload.of(topic, payload);
+
+        // Defensive server-side dedup — skip if this exact ID was already sent
+        String dedupKey = WS_DEDUP_PREFIX + wrapped.getMessageId();
+        Boolean added = redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", DEDUP_TTL);
+        if (Boolean.FALSE.equals(added)) {
+            log.debug("WebSocket dedup skip messageId={} topic={} userId={}",
+                    wrapped.getMessageId(), topic, userId);
+            return;
         }
+
+        String destination = "/user/" + userId + "/queue/events";
+        messagingTemplate.convertAndSend(destination, wrapped);
+
+        log.debug("WebSocket notify userId={} topic={} messageId={}",
+                userId, topic, wrapped.getMessageId());
     }
 
-    public void broadcast(String topic, Object payload) {
-        messagingTemplate.convertAndSend("/topic/" + topic, payload);
+    /**
+     * Broadcasts a payload to all subscribers on a topic.
+     * Also wrapped in WsPayload with deduplication support.
+     */
+    public <T> void broadcast(String topic, T payload) {
+        WsPayload<T> wrapped = WsPayload.of(topic, payload);
+
+        String dedupKey = WS_DEDUP_PREFIX + wrapped.getMessageId();
+        redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", DEDUP_TTL);
+
+        messagingTemplate.convertAndSend("/topic/" + topic, wrapped);
+
+        log.debug("WebSocket broadcast topic={} messageId={}", topic, wrapped.getMessageId());
     }
 }

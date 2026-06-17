@@ -9,7 +9,11 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "refresh_tokens")
+@Table(name = "refresh_tokens", indexes = {
+        @Index(name = "idx_refresh_tokens_user_id", columnList = "user_id"),
+        @Index(name = "idx_refresh_tokens_token_hash", columnList = "token_hash"),
+        @Index(name = "idx_refresh_tokens_device", columnList = "device_id")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -31,6 +35,9 @@ public class RefreshToken {
 
     @Column(name = "device_info", length = 255)
     private String deviceInfo;
+
+    @Column(name = "device_id", length = 255)
+    private String deviceId;
 
     @Column(name = "ip_address", length = 45)
     private String ipAddress;

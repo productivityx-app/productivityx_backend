@@ -42,7 +42,7 @@ dependencies {
     implementation libs.spring.boot.starter.validation
     implementation "org.springframework.boot:spring-boot-starter-data-redis"
 
-    // Spring Retry — @Retryable on EmailService.send()
+    // Spring Retry @Retryable on EmailService.send()
     implementation libs.spring.retry
     implementation libs.spring.boot.starter.aspectj
 
@@ -63,6 +63,9 @@ dependencies {
 
     implementation "org.jetbrains.kotlin:kotlin-stdlib"
 
+    // Firebase Admin SDK (FCM push notifications)
+    implementation("com.google.firebase:firebase-admin:9.4.3")
+
     compileOnly libs.lombok
     annotationProcessor libs.lombok
 
@@ -75,8 +78,29 @@ dependencies {
     testImplementation libs.testcontainers.postgresql
 
     implementation(libs.java.diff.utils)
+
+    // Test
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.security:spring-security-test")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-tasks.named('test') {
+test {
     useJUnitPlatform()
+}
+
+// Only configure Kotlin tasks if Kotlin sources exist
+tasks.whenTaskAdded { task ->
+    if (task.name == 'compileKotlin') {
+        task.kotlinOptions {
+            freeCompilerArgs += "-Xjsr305=strict"
+            jvmTarget = "21"
+        }
+    }
+    if (task.name == 'compileTestKotlin') {
+        task.kotlinOptions {
+            freeCompilerArgs += "-Xjsr305=strict"
+            jvmTarget = "21"
+        }
+    }
 }

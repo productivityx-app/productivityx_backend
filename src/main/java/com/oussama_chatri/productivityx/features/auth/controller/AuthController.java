@@ -95,7 +95,8 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    @Operation(summary = "Login — returns accessToken in body, sets refreshToken as HttpOnly cookie")
+    @Operation(summary = "Login — returns accessToken in body, sets refreshToken as HttpOnly cookie. " +
+            "Pass deviceId, deviceName, platform for multi-device tracking.")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Login successful"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Invalid credentials or unverified email"),
@@ -110,17 +111,19 @@ public class AuthController {
     }
 
     @PostMapping("/refresh")
-    @Operation(summary = "Rotate refresh token — reads from HttpOnly cookie, returns new accessToken")
+    @Operation(summary = "Rotate refresh token — reads from HttpOnly cookie, returns new accessToken. " +
+            "Pass X-Device-Id header for device-bound refresh verification.")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Token rotated successfully"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Refresh token missing, invalid, or revoked")
     })
     public ResponseEntity<ApiResponse<AuthResponse>> refresh(
             HttpServletRequest request,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
             HttpServletResponse response) {
         String rawToken = extractRefreshCookie(request);
         return ResponseEntity.ok(ApiResponse.ok(
-                authService.refresh(rawToken, response), "Token refreshed."));
+                authService.refresh(rawToken, deviceId, response), "Token refreshed."));
     }
 
     @PostMapping("/logout")
@@ -226,7 +229,7 @@ public class AuthController {
 
     private String resolveToken(String queryParam, String bodyToken) {
         if (queryParam != null && !queryParam.isBlank()) return queryParam;
-        if (bodyToken  != null && !bodyToken.isBlank())  return bodyToken;
+        if (bodyToken != null && !bodyToken.isBlank()) return bodyToken;
         return null;
     }
 }

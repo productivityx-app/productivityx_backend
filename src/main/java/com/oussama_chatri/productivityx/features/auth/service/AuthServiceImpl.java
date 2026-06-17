@@ -2,6 +2,7 @@ package com.oussama_chatri.productivityx.features.auth.service;
 
 import com.oussama_chatri.productivityx.core.audit.AuditEvent;
 import com.oussama_chatri.productivityx.core.audit.AuditService;
+import com.oussama_chatri.productivityx.core.enums.Platform;
 import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.core.exception.ErrorCode;
 import com.oussama_chatri.productivityx.core.user.User;
@@ -16,8 +17,11 @@ import com.oussama_chatri.productivityx.features.auth.dto.response.ForgotPasswor
 import com.oussama_chatri.productivityx.features.auth.dto.response.UserResponse;
 import com.oussama_chatri.productivityx.features.auth.entity.EmailVerificationToken;
 import com.oussama_chatri.productivityx.features.auth.entity.PasswordResetToken;
+import com.oussama_chatri.productivityx.features.auth.entity.RefreshToken;
+import com.oussama_chatri.productivityx.features.auth.entity.UserDevice;
 import com.oussama_chatri.productivityx.features.auth.repository.EmailVerificationTokenRepository;
 import com.oussama_chatri.productivityx.features.auth.repository.PasswordResetTokenRepository;
+import com.oussama_chatri.productivityx.features.auth.repository.UserDeviceRepository;
 import com.oussama_chatri.productivityx.features.preferences.entity.UserPreferences;
 import com.oussama_chatri.productivityx.features.preferences.repository.UserPreferencesRepository;
 import com.oussama_chatri.productivityx.features.profile.entity.Profile;
@@ -36,30 +40,32 @@ import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class AuthServiceImpl implements AuthService {
 
-    private static final int  MAX_FAILED_LOGINS    = 5;
+    private static final int MAX_FAILED_LOGINS = 5;
     private static final long LOCK_DURATION_MINUTES = 15L;
-    private static final int  OTP_MAX_ATTEMPTS      = 5;
+    private static final int OTP_MAX_ATTEMPTS = 5;
 
-    private final UserRepository                   userRepository;
-    private final ProfileRepository                profileRepository;
-    private final UserPreferencesRepository        preferencesRepository;
+    private final UserRepository userRepository;
+    private final ProfileRepository profileRepository;
+    private final UserPreferencesRepository preferencesRepository;
+    private final UserDeviceRepository userDeviceRepository;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
-    private final PasswordResetTokenRepository     passwordResetTokenRepository;
-    private final PasswordEncoder                  passwordEncoder;
-    private final EmailService                     emailService;
-    private final SecurityUtils                    securityUtils;
-    private final ValidationUtils                  validationUtils;
-    private final RateLimiterService               rateLimiterService;
-    private final TokenService                     tokenService;
-    private final AuditService                     auditService;
-    private final CryptoUtils                      cryptoUtils;
-    private final StringUtils                      stringUtils;
+    private final PasswordResetTokenRepository passwordResetTokenRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final EmailService emailService;
+    private final SecurityUtils securityUtils;
+    private final ValidationUtils validationUtils;
+    private final RateLimiterService rateLimiterService;
+    private final TokenService tokenService;
+    private final AuditService auditService;
+    private final CryptoUtils cryptoUtils;
+    private final StringUtils stringUtils;
 
     @Value("${app.jwt.access-expiry-ms:900000}")
     private long accessExpiryMs;
@@ -67,7 +73,7 @@ public class AuthServiceImpl implements AuthService {
     @Value("${app.base-url}")
     private String baseUrl;
 
-    // Register
+    // Registration
 
     @Override
     @Transactional
@@ -144,41 +150,42 @@ public class AuthServiceImpl implements AuthService {
         User user = userRepository.findByEmail(request.getEmail().toLowerCase().trim())
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
 
-        if (user.isEmailVerified()) {
-            throw AppException.badRequest(ErrorCode.AUTH_TOKEN_INVALID);
-        }
-
-        rateLimiterService.checkOtpLimit(user.getId().toString());
-
-        EmailVerificationToken tokenEntity = emailVerificationTokenRepository
+        EmailVerificationToken token = emailVerificationTokenRepository
                 .findLatestActiveOtpForUser(user.getId(), request.getOtp())
                 .orElseThrow(() -> {
-                    emailVerificationTokenRepository
-                            .findLatestActiveTokenForUser(user.getId())
-                            .ifPresent(t -> {
-                                t.setOtpAttempts(t.getOtpAttempts() + 1);
-                                if (t.getOtpAttempts() >= OTP_MAX_ATTEMPTS) {
-                                    t.setUsedAt(Instant.now());
-                                }
-                                emailVerificationTokenRepository.save(t);
-                            });
+                    incrementOtpAttempt(user.getId());
                     return AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID);
                 });
 
-        if (Instant.now().isAfter(tokenEntity.getExpiresAt())) {
+        if (token.getOtpAttempts() >= OTP_MAX_ATTEMPTS) {
+            throw AppException.rateLimited(ErrorCode.RATE_OTP_EXCEEDED);
+        }
+        if (Instant.now().isAfter(token.getExpiresAt())) {
             throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_EXPIRED);
         }
 
-        int attempts = tokenEntity.getOtpAttempts() + 1;
-        tokenEntity.setOtpAttempts(attempts);
-        if (attempts >= OTP_MAX_ATTEMPTS) {
-            tokenEntity.setUsedAt(Instant.now());
-            emailVerificationTokenRepository.save(tokenEntity);
-            throw AppException.rateLimited(ErrorCode.RATE_OTP_EXCEEDED);
-        }
-        emailVerificationTokenRepository.save(tokenEntity);
+        return completeVerification(token, response);
+    }
 
-        return completeVerification(tokenEntity, response);
+    private AuthResponse completeVerification(EmailVerificationToken token, HttpServletResponse response) {
+        User user = token.getUser();
+        user.setEmailVerified(true);
+        userRepository.save(user);
+
+        token.setUsedAt(Instant.now());
+        emailVerificationTokenRepository.save(token);
+
+        auditService.log(AuditEvent.EMAIL_VERIFIED, user.getId(), null);
+        log.info("Email verified: {}", stringUtils.maskEmail(user.getEmail()));
+
+        return tokenService.issueTokenPair(user, null, null, null, response);
+    }
+
+    private void incrementOtpAttempt(UUID userId) {
+        emailVerificationTokenRepository.findLatestActiveTokenForUser(userId).ifPresent(t -> {
+            t.setOtpAttempts(t.getOtpAttempts() + 1);
+            emailVerificationTokenRepository.save(t);
+        });
     }
 
     // Resend verification
@@ -186,82 +193,90 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional
     public void resendVerification(ResendVerificationRequest request) {
-        userRepository.findByEmail(request.getEmail().toLowerCase().trim()).ifPresent(user -> {
-            if (user.isEmailVerified()) return;
-            rateLimiterService.checkResendLimit(user.getId().toString());
+        if (!validationUtils.isValidEmail(request.getEmail())) {
+            throw AppException.badRequest(ErrorCode.VAL_INVALID_EMAIL);
+        }
 
-            String otp = generateOtp();
-            EmailVerificationToken evToken = tokenService.createEmailVerificationToken(user, otp);
+        User user = userRepository.findByEmail(request.getEmail().toLowerCase().trim()).orElse(null);
+        if (user == null) {
+            log.debug("Resend verification requested for unknown email");
+            return;
+        }
+        if (user.isEmailVerified()) {
+            throw AppException.badRequest(ErrorCode.AUTH_EMAIL_ALREADY_VERIFIED);
+        }
 
-            Profile profile  = profileRepository.findByUserId(user.getId()).orElse(null);
-            String firstName = profile != null ? profile.getFirstName() : "there";
-            String verifyUrl = baseUrl + "/api/v1/auth/verify-email?token=" + evToken.getRawToken();
-            emailService.sendVerificationEmail(user.getEmail(), firstName, verifyUrl, otp);
-        });
+        rateLimiterService.assertResendAllowed(user.getId());
+
+        String otp = generateOtp();
+        EmailVerificationToken evToken = tokenService.createEmailVerificationToken(user, otp);
+        String verificationUrl = baseUrl + "/api/v1/auth/verify-email?token=" + evToken.getRawToken();
+
+        Profile profile = profileRepository.findByUserId(user.getId()).orElse(null);
+        String firstName = profile != null ? profile.getFirstName() : null;
+        emailService.sendVerificationEmail(user.getEmail(), firstName, verificationUrl, otp);
     }
 
-    // Login
+    // Login with device tracking
 
     @Override
     @Transactional
-    public AuthResponse login(LoginRequest request, HttpServletRequest httpRequest,
-                              HttpServletResponse response) {
-        String ip = resolveClientIp(httpRequest);
-        rateLimiterService.checkLoginLimit(ip);
+    public AuthResponse login(LoginRequest request, HttpServletRequest httpRequest, HttpServletResponse response) {
+        String clientIp = extractClientIp(httpRequest);
+        String identifier = request.getIdentifier().trim();
 
-        User user = userRepository.findByIdentifier(request.getIdentifier())
+        User user = userRepository.findByIdentifier(identifier)
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_USER_NOT_FOUND));
-
-        if (!user.isActive()) {
-            throw AppException.forbidden(ErrorCode.AUTH_ACCOUNT_INACTIVE);
-        }
-        if (user.getLockedUntil() != null && Instant.now().isBefore(user.getLockedUntil())) {
-            auditService.log(AuditEvent.ACCOUNT_LOCKED, user.getId(), ip);
-            throw AppException.forbidden(ErrorCode.AUTH_ACCOUNT_LOCKED);
-        }
-
-        if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
-            int failures = user.getFailedLoginCount() + 1;
-            user.setFailedLoginCount(failures);
-            if (failures >= MAX_FAILED_LOGINS) {
-                user.setLockedUntil(Instant.now().plus(LOCK_DURATION_MINUTES, ChronoUnit.MINUTES));
-                auditService.log(AuditEvent.ACCOUNT_LOCKED, user.getId(), ip,
-                        "Locked after " + failures + " failed attempts");
-                log.warn("Account locked: {}", stringUtils.maskEmail(user.getEmail()));
-            }
-            userRepository.save(user);
-            auditService.log(AuditEvent.LOGIN_FAILURE, user.getId(), ip);
-
-            throw AppException.unauthorized(ErrorCode.AUTH_WRONG_PASSWORD);
-        }
 
         if (!user.isEmailVerified()) {
             throw AppException.forbidden(ErrorCode.AUTH_EMAIL_NOT_VERIFIED);
         }
 
-        user.setFailedLoginCount(0);
-        user.setLockedUntil(null);
+        if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(Instant.now())) {
+            auditService.log(AuditEvent.ACCOUNT_LOCKED, user.getId(), clientIp);
+            throw AppException.forbidden(ErrorCode.AUTH_ACCOUNT_LOCKED);
+        }
+
+        if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
+            handleFailedLogin(user, clientIp);
+            throw AppException.unauthorized(ErrorCode.AUTH_WRONG_PASSWORD);
+        }
+
+        // Reset failed login counter on success
+        if (user.getFailedLoginCount() > 0) {
+            user.setFailedLoginCount(0);
+        }
         user.setLastLoginAt(Instant.now());
         userRepository.save(user);
 
-        // Clear rate-limit counter on successful login so the user can
-        // re-authenticate (e.g. from another device) without being blocked.
-        rateLimiterService.resetLoginLimit(ip);
+        // Upsert device record for multi-device session tracking
+        String deviceId = request.getDeviceId();
+        String deviceName = request.getDeviceName();
+        Platform platform = parsePlatform(request.getPlatform());
+        if (deviceId != null && !deviceId.isBlank()) {
+            upsertDevice(user, deviceId, deviceName, platform);
+        }
 
-        auditService.log(AuditEvent.LOGIN_SUCCESS, user.getId(), ip);
-        return tokenService.issueTokenPair(user, ip, httpRequest.getHeader("User-Agent"), response);
+        auditService.log(AuditEvent.LOGIN_SUCCESS, user.getId(), clientIp, deviceName);
+        log.info("Login success userId={} device={} platform={}", user.getId(), deviceName, platform);
+
+        return tokenService.issueTokenPair(user, clientIp, deviceName, deviceId, response);
     }
 
-    // Refresh
+    // Refresh with device binding check
 
     @Override
     @Transactional
-    public AuthResponse refresh(String rawRefreshToken, HttpServletResponse response) {
-        if (rawRefreshToken == null || rawRefreshToken.isBlank()) {
-            throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID);
+    public AuthResponse refresh(String rawToken, String deviceId, HttpServletResponse response) {
+        RefreshToken oldToken = tokenService.rotateRefreshToken(rawToken, deviceId, response);
+        User user = oldToken.getUser();
+
+        // Update device last-seen timestamp
+        if (deviceId != null && oldToken.getDeviceId() != null) {
+            userDeviceRepository.updateLastSeen(user.getId(), oldToken.getDeviceId(), Instant.now());
         }
-        var rotated = tokenService.rotateRefreshToken(rawRefreshToken, response);
-        String accessToken = tokenService.createAccessToken(rotated.getUser());
+
+        String accessToken = tokenService.createAccessToken(user);
         return AuthResponse.of(accessToken, tokenService.accessExpiryMs());
     }
 
@@ -269,88 +284,67 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
-    public void logout(String rawRefreshToken, HttpServletResponse response) {
-        tokenService.revokeRefreshToken(rawRefreshToken);
+    public void logout(String rawToken, HttpServletResponse response) {
+        tokenService.revokeRefreshToken(rawToken);
         tokenService.clearRefreshCookie(response);
+        log.debug("Logout completed");
     }
 
-    // Forgot password — Step 1: generate OTP + send email with both OTP and reset link
+    // Forgot password
 
     @Override
     @Transactional
     public void forgotPassword(ForgotPasswordRequest request) {
-        userRepository.findByEmail(request.getEmail().toLowerCase().trim()).ifPresent(user -> {
-            String otp = generateOtp();
-            PasswordResetToken resetToken = tokenService.createPasswordResetToken(user, otp);
+        if (!validationUtils.isValidEmail(request.getEmail())) {
+            throw AppException.badRequest(ErrorCode.VAL_INVALID_EMAIL);
+        }
 
-            Profile profile  = profileRepository.findByUserId(user.getId()).orElse(null);
-            String firstName = profile != null ? profile.getFirstName() : "there";
+        User user = userRepository.findByEmail(request.getEmail().toLowerCase().trim()).orElse(null);
+        if (user == null) {
+            log.debug("Forgot password requested for unknown email");
+            return;
+        }
 
-            // The reset link lets users skip OTP entry on web; the OTP is for the mobile app
-            String resetUrl = baseUrl + "/auth/reset-password?token=" + resetToken.getRawToken();
-            emailService.sendPasswordResetEmail(user.getEmail(), firstName, resetUrl, otp);
-        });
+        rateLimiterService.assertResendAllowed(user.getId());
+
+        String otp = generateOtp();
+        PasswordResetToken prToken = tokenService.createPasswordResetToken(user, otp);
+        String resetUrl = baseUrl + "/api/v1/auth/reset-password?token=" + prToken.getRawToken();
+
+        Profile profile = profileRepository.findByUserId(user.getId()).orElse(null);
+        String firstName = profile != null ? profile.getFirstName() : null;
+        emailService.sendPasswordResetEmail(user.getEmail(), firstName, resetUrl, otp);
     }
-
-    // Forgot password — Step 2: verify OTP, return short-lived resetToken for /reset-password
 
     @Override
     @Transactional
-    public ForgotPasswordOtpVerifiedResponse verifyForgotPasswordOtp(
-            VerifyForgotPasswordOtpRequest request) {
-
+    public ForgotPasswordOtpVerifiedResponse verifyForgotPasswordOtp(VerifyForgotPasswordOtpRequest request) {
         User user = userRepository.findByEmail(request.getEmail().toLowerCase().trim())
+                .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_USER_NOT_FOUND));
+
+        PasswordResetToken token = passwordResetTokenRepository
+                .findLatestActiveOtpForUser(user.getId(), request.getOtp())
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
 
-        rateLimiterService.checkOtpLimit("pr:" + user.getId().toString());
-
-        PasswordResetToken tokenEntity = passwordResetTokenRepository
-                .findLatestActiveOtpForUser(user.getId(), request.getOtp())
-                .orElseThrow(() -> {
-                    // Increment DB attempt counter on wrong OTP (defense-in-depth)
-                    passwordResetTokenRepository
-                            .findLatestActiveTokenForUser(user.getId())
-                            .ifPresent(t -> {
-                                t.setOtpAttempts(t.getOtpAttempts() + 1);
-                                if (t.getOtpAttempts() >= OTP_MAX_ATTEMPTS) {
-                                    t.setUsedAt(Instant.now());
-                                }
-                                passwordResetTokenRepository.save(t);
-                            });
-                    return AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID);
-                });
-
-        if (Instant.now().isAfter(tokenEntity.getExpiresAt())) {
+        if (token.getOtpAttempts() >= OTP_MAX_ATTEMPTS) {
+            throw AppException.rateLimited(ErrorCode.RATE_OTP_EXCEEDED);
+        }
+        if (Instant.now().isAfter(token.getExpiresAt())) {
             throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_EXPIRED);
         }
 
-        int attempts = tokenEntity.getOtpAttempts() + 1;
-        tokenEntity.setOtpAttempts(attempts);
-        if (attempts >= OTP_MAX_ATTEMPTS) {
-            tokenEntity.setUsedAt(Instant.now());
-            passwordResetTokenRepository.save(tokenEntity);
-            throw AppException.rateLimited(ErrorCode.RATE_OTP_EXCEEDED);
-        }
-        passwordResetTokenRepository.save(tokenEntity);
-
-        // Return the raw token so the client can pass it directly to /reset-password.
-        // The raw value was set as a transient field when the token was created — it matches
-        // the tokenHash stored in DB, so /reset-password can validate it via SHA-256.
+        // Issue a short-lived reset token
+        PasswordResetToken resetToken = tokenService.createPasswordResetToken(user, null);
         return ForgotPasswordOtpVerifiedResponse.builder()
-                .resetToken(rebuildRawToken(tokenEntity))
+                .resetToken(resetToken.getRawToken())
                 .build();
     }
-
-    // Reset password
 
     @Override
     @Transactional
     public void resetPassword(ResetPasswordRequest request) {
-        if (!validationUtils.isValidPassword(request.getNewPassword())) {
-            throw AppException.badRequest(ErrorCode.VAL_WEAK_PASSWORD);
-        }
-
         String hash = cryptoUtils.sha256Hex(request.getToken());
+
         PasswordResetToken token = passwordResetTokenRepository
                 .findByTokenHashAndUsedAtIsNull(hash)
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
@@ -359,17 +353,22 @@ public class AuthServiceImpl implements AuthService {
             throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_EXPIRED);
         }
 
-        token.setUsedAt(Instant.now());
-        passwordResetTokenRepository.save(token);
+        if (!validationUtils.isValidPassword(request.getNewPassword())) {
+            throw AppException.badRequest(ErrorCode.VAL_WEAK_PASSWORD);
+        }
 
         User user = token.getUser();
         user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
-        user.setFailedLoginCount(0);
-        user.setLockedUntil(null);
         userRepository.save(user);
 
+        token.setUsedAt(Instant.now());
+        passwordResetTokenRepository.save(token);
+
+        // Revoke all sessions after password reset
         tokenService.revokeAllRefreshTokens(user.getId());
+
         auditService.log(AuditEvent.PASSWORD_RESET, user.getId(), null);
+        log.info("Password reset for userId={}", user.getId());
     }
 
     // Change password
@@ -387,12 +386,22 @@ public class AuthServiceImpl implements AuthService {
         }
 
         user.setPasswordHash(passwordEncoder.encode(request.getNewPassword()));
-        user.setFailedLoginCount(0);
-        user.setLockedUntil(null);
         userRepository.save(user);
 
-        tokenService.revokeAllRefreshTokens(user.getId());
         auditService.log(AuditEvent.PASSWORD_CHANGED, user.getId(), null);
+    }
+
+    // Me
+
+    @Override
+    @Transactional(readOnly = true)
+    public UserResponse me() {
+        User user = securityUtils.currentUser();
+        Profile profile = profileRepository.findByUserId(user.getId())
+                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_USER_NOT_FOUND));
+        UserPreferences prefs = preferencesRepository.findByUserId(user.getId())
+                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_USER_NOT_FOUND));
+        return UserResponse.from(user, profile, prefs);
     }
 
     // Delete account
@@ -403,69 +412,68 @@ public class AuthServiceImpl implements AuthService {
         User user = securityUtils.currentUser();
 
         if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
-            throw AppException.badRequest(ErrorCode.AUTH_PASSWORD_MISMATCH);
+            throw AppException.unauthorized(ErrorCode.AUTH_PASSWORD_MISMATCH);
         }
 
-        auditService.log(AuditEvent.ACCOUNT_DELETED, user.getId(), null,
-                stringUtils.maskEmail(user.getEmail()));
+        tokenService.revokeAllRefreshTokens(user.getId());
+        auditService.log(AuditEvent.ACCOUNT_DELETED, user.getId(), null);
+
         userRepository.delete(user);
+        log.info("Account deleted userId={}", user.getId());
     }
 
-    // Me
+    // Helpers
 
-    @Override
-    @Transactional(readOnly = true)
-    public UserResponse me() {
-        User user       = securityUtils.currentUser();
-        Profile profile = profileRepository.findByUserId(user.getId())
-                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_NOT_FOUND));
-        UserPreferences prefs = preferencesRepository.findByUserId(user.getId())
-                .orElseThrow(() -> AppException.notFound(ErrorCode.RES_NOT_FOUND));
-        return UserResponse.from(user, profile, prefs);
-    }
+    private void handleFailedLogin(User user, String clientIp) {
+        int attempts = user.getFailedLoginCount() + 1;
+        user.setFailedLoginCount(attempts);
 
-    // Private helpers
+        if (attempts >= MAX_FAILED_LOGINS) {
+            user.setLockedUntil(Instant.now().plus(LOCK_DURATION_MINUTES, ChronoUnit.MINUTES));
+            auditService.log(AuditEvent.ACCOUNT_LOCKED, user.getId(), clientIp);
+            log.warn("Account locked userId={} after {} failed attempts", user.getId(), attempts);
+        }
 
-    private AuthResponse completeVerification(EmailVerificationToken tokenEntity,
-                                              HttpServletResponse response) {
-        tokenEntity.setUsedAt(Instant.now());
-        emailVerificationTokenRepository.save(tokenEntity);
-
-        User user = tokenEntity.getUser();
-        user.setEmailVerified(true);
         userRepository.save(user);
-
-        auditService.log(AuditEvent.EMAIL_VERIFIED, user.getId(), null);
-        return tokenService.issueTokenPair(user, null, null, response);
+        auditService.log(AuditEvent.LOGIN_FAILURE, user.getId(), clientIp);
     }
 
-    /**
-     * After OTP verification we need to hand the client a token they can use for /reset-password.
-     * The tokenHash in DB is SHA-256(rawToken). Since we don't store rawToken, we issue a NEW
-     * dedicated token tied to the same user (marks the OTP token as used separately via
-     * otpAttempts; the original token's tokenHash is still valid for /reset-password via link).
-     *
-     * Simpler alternative used here: mark the verified OTP token and return its existing tokenHash
-     * directly — but that exposes the hash. Instead, we create a fresh short-lived token.
-     */
-    private String rebuildRawToken(PasswordResetToken verifiedToken) {
-        // Create a fresh 15-min token the client can use for the /reset-password call.
-        // The OTP token itself stays open so the link in the email still works.
-        PasswordResetToken freshToken = tokenService.createPasswordResetToken(
-                verifiedToken.getUser(), null);
-        return freshToken.getRawToken();
+    private void upsertDevice(User user, String deviceId, String deviceName, Platform platform) {
+        userDeviceRepository.findByUserIdAndDeviceId(user.getId(), deviceId)
+                .ifPresentOrElse(
+                        existing -> {
+                            existing.setLastSeenAt(Instant.now());
+                            if (deviceName != null) existing.setDeviceName(deviceName);
+                            existing.setPlatform(platform);
+                            userDeviceRepository.save(existing);
+                        },
+                        () -> userDeviceRepository.save(UserDevice.builder()
+                                .user(user)
+                                .deviceId(deviceId)
+                                .deviceName(deviceName)
+                                .platform(platform)
+                                .lastSeenAt(Instant.now())
+                                .build())
+                );
+    }
+
+    private Platform parsePlatform(String raw) {
+        if (raw == null || raw.isBlank()) return Platform.WEB;
+        try {
+            return Platform.valueOf(raw.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return Platform.WEB;
+        }
+    }
+
+    private String extractClientIp(HttpServletRequest request) {
+        String xf = request.getHeader("X-Forwarded-For");
+        return xf != null ? xf.split(",")[0].trim() : request.getRemoteAddr();
     }
 
     private String generateOtp() {
-        // 6-digit numeric OTP — zero-padded so "000123" is valid
-        return String.format("%06d", new SecureRandom().nextInt(1_000_000));
-    }
-
-    private String resolveClientIp(HttpServletRequest request) {
-        String xff = request.getHeader("X-Forwarded-For");
-        if (xff != null && !xff.isBlank()) {
-            return xff.split(",")[0].trim();
-        }
-        return request.getRemoteAddr();
+        SecureRandom random = new SecureRandom();
+        int code = 100000 + random.nextInt(900000);
+        return String.valueOf(code);
     }
 }

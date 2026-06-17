@@ -11,26 +11,27 @@ public interface AuthService {
 
     void register(RegisterRequest request);
 
-    AuthResponse verifyEmail(String token, HttpServletResponse response);
+    AuthResponse verifyEmail(String rawToken, HttpServletResponse response);
+
     AuthResponse verifyOtp(VerifyOtpRequest request, HttpServletResponse response);
+
     void resendVerification(ResendVerificationRequest request);
 
     AuthResponse login(LoginRequest request, HttpServletRequest httpRequest, HttpServletResponse response);
 
-    AuthResponse refresh(String refreshToken, HttpServletResponse response);
+    AuthResponse refresh(String rawToken, String deviceId, HttpServletResponse response);
 
-    void logout(String refreshToken, HttpServletResponse response);
+    void logout(String rawToken, HttpServletResponse response);
 
     void forgotPassword(ForgotPasswordRequest request);
 
-    // Step 2 of forgot-password: verifies the OTP and returns a short-lived resetToken
     ForgotPasswordOtpVerifiedResponse verifyForgotPasswordOtp(VerifyForgotPasswordOtpRequest request);
 
     void resetPassword(ResetPasswordRequest request);
 
     void changePassword(ChangePasswordRequest request);
 
-    void deleteAccount(DeleteAccountRequest request);
-
     UserResponse me();
+
+    void deleteAccount(DeleteAccountRequest request);
 }

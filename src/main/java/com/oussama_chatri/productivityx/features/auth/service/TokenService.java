@@ -30,11 +30,11 @@ public class TokenService {
 
     private static final String REFRESH_COOKIE_NAME = "refreshToken";
 
-    private final RefreshTokenRepository           refreshTokenRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
-    private final PasswordResetTokenRepository     passwordResetTokenRepository;
-    private final JwtService                       jwtService;
-    private final CryptoUtils                      cryptoUtils;
+    private final PasswordResetTokenRepository passwordResetTokenRepository;
+    private final JwtService jwtService;
+    private final CryptoUtils cryptoUtils;
 
     @Value("${app.jwt.access-expiry-ms:900000}")
     private long accessExpiryMs;
@@ -55,7 +55,7 @@ public class TokenService {
     }
 
     @Transactional
-    public AuthResponse issueTokenPair(User user, String ip, String deviceInfo,
+    public AuthResponse issueTokenPair(User user, String ip, String deviceInfo, String deviceId,
                                        HttpServletResponse response) {
         String accessToken = createAccessToken(user);
         String raw = generateSecureRandom();
@@ -63,6 +63,7 @@ public class TokenService {
                 .user(user)
                 .tokenHash(cryptoUtils.sha256Hex(raw))
                 .deviceInfo(deviceInfo)
+                .deviceId(deviceId)
                 .ipAddress(ip)
                 .expiresAt(Instant.now().plus(refreshExpiryDays, ChronoUnit.DAYS))
                 .build());
@@ -71,7 +72,7 @@ public class TokenService {
     }
 
     @Transactional
-    public RefreshToken rotateRefreshToken(String raw, HttpServletResponse response) {
+    public RefreshToken rotateRefreshToken(String raw, String deviceId, HttpServletResponse response) {
         String hash = cryptoUtils.sha256Hex(raw);
         RefreshToken token = refreshTokenRepository.findByTokenHash(hash)
                 .orElseThrow(() -> AppException.unauthorized(ErrorCode.AUTH_TOKEN_INVALID));
@@ -85,6 +86,12 @@ public class TokenService {
             throw AppException.unauthorized(ErrorCode.AUTH_TOKEN_EXPIRED);
         }
 
+        // Verify device binding on refresh
+        if (deviceId != null && token.getDeviceId() != null && !deviceId.equals(token.getDeviceId())) {
+            refreshTokenRepository.revokeAllForUser(token.getUser().getId(), Instant.now());
+            throw AppException.unauthorized(ErrorCode.AUTH_REFRESH_TOKEN_REVOKED);
+        }
+
         token.setRevokedAt(Instant.now());
         refreshTokenRepository.save(token);
 
@@ -93,6 +100,7 @@ public class TokenService {
                 .user(token.getUser())
                 .tokenHash(cryptoUtils.sha256Hex(newRaw))
                 .deviceInfo(token.getDeviceInfo())
+                .deviceId(token.getDeviceId())
                 .ipAddress(token.getIpAddress())
                 .expiresAt(Instant.now().plus(refreshExpiryDays, ChronoUnit.DAYS))
                 .build());
