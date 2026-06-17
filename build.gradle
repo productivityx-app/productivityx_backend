@@ -27,11 +27,11 @@ dependencyManagement {
     }
 }
 
-dependencyCheck {
-    nvd {
-        apiKey = "b31bb0c9-1aa3-41ee-8bcf-257b51879125"
-    }
-}
+//dependencyCheck {
+//    nvd {
+//        apiKey = System.getenv("NVD_API_KEY") ?: ""
+//    }
+//}
 
 dependencies {
     implementation libs.spring.boot.starter.web
