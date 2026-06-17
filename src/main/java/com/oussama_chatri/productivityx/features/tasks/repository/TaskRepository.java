@@ -96,13 +96,16 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     /**
      * Cursor-based delta sync for tasks.
      * Paginates tasks modified after cursor position for stable sync pages.
+     *
+     * <p>Uses {@code CAST(... AS TEXT)} instead of {@code ::text} — Hibernate native
+     * query parser incorrectly treats {@code :param::text} as a single parameter.
      */
     @Query(value = """
             SELECT t.* FROM tasks t
             WHERE t.user_id = :userId
               AND t.updated_at >= :since
               AND (t.updated_at > :cursorUpdatedAt
-                   OR (t.updated_at = :cursorUpdatedAt AND t.id::text > :cursorId::text))
+                   OR (t.updated_at = :cursorUpdatedAt AND CAST(t.id AS TEXT) > CAST(:cursorId AS TEXT)))
             ORDER BY t.updated_at ASC, t.id ASC
             LIMIT :limitVal
             """, nativeQuery = true)
@@ -181,7 +184,7 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     @Query(value = """
             WITH batch AS (
                 SELECT id FROM tasks
-                WHERE is_deleted = true AND deleted_at < :cutoff
+                WHERE deleted = true AND deleted_at < :cutoff
                 LIMIT 500
             )
             DELETE FROM tasks WHERE id IN (SELECT id FROM batch)

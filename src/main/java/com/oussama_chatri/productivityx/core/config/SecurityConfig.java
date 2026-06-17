@@ -2,6 +2,7 @@ package com.oussama_chatri.productivityx.core.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.oussama_chatri.productivityx.core.filter.IdempotencyFilter;
+import com.oussama_chatri.productivityx.core.filter.RequestLoggingFilter;
 import com.oussama_chatri.productivityx.core.security.JwtAuthFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -41,6 +42,7 @@ public class SecurityConfig {
     private final UserDetailsService userDetailsService;
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper        objectMapper;
+    private final RequestLoggingFilter requestLoggingFilter;
 
     @Value("${app.allowed-origins:http://localhost:8080}")
     private String allowedOrigins;
@@ -80,6 +82,7 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(requestLoggingFilter, UsernamePasswordAuthenticationFilter.class)
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint((request, response, authException) -> {
                             response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
@@ -109,7 +112,8 @@ public class SecurityConfig {
         config.setAllowedOrigins(Arrays.asList(allowedOrigins.split(",")));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         // Expose Idempotency-Key as an allowed request header
-        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "Idempotency-Key"));
+        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "Idempotency-Key", "X-Request-ID"));
+        config.setExposedHeaders(List.of("X-Request-ID"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

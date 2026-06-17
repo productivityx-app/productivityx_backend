@@ -115,13 +115,16 @@ public interface PomodoroSessionRepository extends JpaRepository<PomodoroSession
     /**
      * Cursor-based delta sync for pomodoro sessions.
      * Sessions are immutable, paginate by created_at instead of updated_at.
+     *
+     * <p>Uses {@code CAST(... AS TEXT)} instead of {@code ::text} — Hibernate native
+     * query parser incorrectly treats {@code :param::text} as a single parameter.
      */
     @Query(value = """
             SELECT ps.* FROM pomodoro_sessions ps
             WHERE ps.user_id = :userId
               AND ps.created_at >= :since
               AND (ps.created_at > :cursorUpdatedAt
-                   OR (ps.created_at = :cursorUpdatedAt AND ps.id::text > :cursorId::text))
+                   OR (ps.created_at = :cursorUpdatedAt AND CAST(ps.id AS TEXT) > CAST(:cursorId AS TEXT)))
             ORDER BY ps.created_at ASC, ps.id ASC
             LIMIT :limitVal
             """, nativeQuery = true)

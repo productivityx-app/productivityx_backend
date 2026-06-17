@@ -18,6 +18,13 @@ import java.io.InputStreamReader;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Low-level Gemini API client. Handles streaming (SSE) and blocking completions.
+ *
+ * <p>Uses the Spring-managed {@link ObjectMapper} (from {@code JacksonConfig}) instead
+ * of creating a new instance — this ensures consistent date/time formatting and
+ * unknown-property handling across the entire application.
+ */
 @Component
 @Slf4j
 public class GeminiClient {
@@ -34,13 +41,13 @@ public class GeminiClient {
     @Value("${app.gemini.model:gemini-2.0-flash}")
     private String defaultModel;
 
-    public GeminiClient() {
+    public GeminiClient(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(10, TimeUnit.SECONDS)
                 .readTimeout(120, TimeUnit.SECONDS)
                 .writeTimeout(30, TimeUnit.SECONDS)
                 .build();
-        this.objectMapper = new ObjectMapper();
     }
 
     /**

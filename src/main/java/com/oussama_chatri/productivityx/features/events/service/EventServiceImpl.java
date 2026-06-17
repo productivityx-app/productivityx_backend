@@ -131,8 +131,7 @@ public class EventServiceImpl implements EventService {
         Event event  = findOwnedEvent(eventId, userId);
 
         if (!event.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_EVENT_NOT_FOUND,
-                    "Event is not in trash.");
+            throw AppException.badRequest(ErrorCode.VAL_EVENT_NOT_IN_TRASH);
         }
 
         event.setDeleted(false);
@@ -151,8 +150,7 @@ public class EventServiceImpl implements EventService {
         Event event  = findOwnedEvent(eventId, userId);
 
         if (!event.isDeleted()) {
-            throw AppException.badRequest(ErrorCode.RES_EVENT_NOT_FOUND,
-                    "Move the event to trash before permanently deleting it.");
+            throw AppException.badRequest(ErrorCode.VAL_EVENT_MUST_BE_TRASHED_FIRST);
         }
 
         eventRepository.delete(event);
@@ -220,7 +218,6 @@ public class EventServiceImpl implements EventService {
         if (request.getReminderMinutes() != null) event.setReminderMinutes(request.getReminderMinutes());
     }
 
-    // Dedicated error code instead of the generic VAL_REQUEST_BODY_INVALID
     private void validateTimeRange(Instant startAt, Instant endAt) {
         if (!startAt.isBefore(endAt)) {
             throw AppException.badRequest(ErrorCode.VAL_EVENT_TIME_RANGE);

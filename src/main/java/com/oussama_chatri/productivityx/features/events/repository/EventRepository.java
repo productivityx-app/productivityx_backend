@@ -67,13 +67,16 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
     /**
      * Cursor-based delta sync for events.
      * Stable pagination over updated_at + id for consistent sync pages.
+     *
+     * <p>Uses {@code CAST(... AS TEXT)} instead of {@code ::text} — Hibernate native
+     * query parser incorrectly treats {@code :param::text} as a single parameter.
      */
     @Query(value = """
             SELECT e.* FROM events e
             WHERE e.user_id = :userId
               AND e.updated_at >= :since
               AND (e.updated_at > :cursorUpdatedAt
-                   OR (e.updated_at = :cursorUpdatedAt AND e.id::text > :cursorId::text))
+                   OR (e.updated_at = :cursorUpdatedAt AND CAST(e.id AS TEXT) > CAST(:cursorId AS TEXT)))
             ORDER BY e.updated_at ASC, e.id ASC
             LIMIT :limitVal
             """, nativeQuery = true)
@@ -134,7 +137,7 @@ public interface EventRepository extends JpaRepository<Event, UUID> {
     @Query(value = """
             WITH batch AS (
                 SELECT id FROM events
-                WHERE is_deleted = true AND deleted_at < :cutoff
+                WHERE deleted = true AND deleted_at < :cutoff
                 LIMIT 500
             )
             DELETE FROM events WHERE id IN (SELECT id FROM batch)

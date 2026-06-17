@@ -54,7 +54,9 @@ public enum ErrorCode {
     VAL_TASK_NOT_IN_TRASH("VAL_013", "This task is not in the trash and cannot be restored.", HttpStatus.BAD_REQUEST),
     VAL_TASK_MUST_BE_TRASHED_FIRST("VAL_014", "Move the task to trash before permanently deleting it.", HttpStatus.BAD_REQUEST),
     VAL_NOTE_MUST_BE_TRASHED_FIRST("VAL_015", "Move the note to trash before permanently deleting it.", HttpStatus.BAD_REQUEST),
-    VAL_SYNC_RANGE_TOO_LARGE("VAL_016", "Sync range too large. The 'since' parameter cannot be more than 30 days in the past.", HttpStatus.BAD_REQUEST),
+    VAL_SYNC_RANGE_TOO_LARGE("VAL_016", "Sync range too large. The 'since' parameter cannot be more than 365 days in the past.", HttpStatus.BAD_REQUEST),
+    VAL_EVENT_MUST_BE_TRASHED_FIRST("VAL_017", "Move the event to trash before permanently deleting it.", HttpStatus.BAD_REQUEST),
+    VAL_EVENT_NOT_IN_TRASH("VAL_018", "This event is not in the trash and cannot be restored.", HttpStatus.BAD_REQUEST),
 
     // Rate limiting
     RATE_LOGIN_EXCEEDED("RATE_001", "Too many login attempts from this IP. Please wait 15 minutes before trying again.", HttpStatus.TOO_MANY_REQUESTS),

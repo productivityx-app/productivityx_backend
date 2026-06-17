@@ -12,6 +12,7 @@ import org.springframework.stereotype.Repository;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Repository
@@ -77,13 +78,17 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
      * Cursor-based delta sync for notes.
      * Returns paginated notes modified after cursor position, ordered by (updated_at, id).
      * Includes both active and deleted notes — clients filter by deleted flag.
+     *
+     * <p>Uses {@code CAST(... AS TEXT)} instead of the PostgreSQL {@code ::text} operator
+     * because Hibernate's native query parser treats {@code :param::text} as a single
+     * parameter named {@code param::text}, causing a {@code QuerySyntaxException}.
      */
     @Query(value = """
             SELECT n.* FROM notes n
             WHERE n.user_id = :userId
               AND n.updated_at >= :since
               AND (n.updated_at > :cursorUpdatedAt
-                   OR (n.updated_at = :cursorUpdatedAt AND n.id::text > :cursorId::text))
+                   OR (n.updated_at = :cursorUpdatedAt AND CAST(n.id AS TEXT) > CAST(:cursorId AS TEXT)))
             ORDER BY n.updated_at ASC, n.id ASC
             LIMIT :limitVal
             """, nativeQuery = true)
@@ -109,7 +114,7 @@ public interface NoteRepository extends JpaRepository<Note, UUID> {
     @Query(value = """
             WITH batch AS (
                 SELECT id FROM notes
-                WHERE is_deleted = true AND deleted_at < :cutoff
+                WHERE deleted = true AND deleted_at < :cutoff
                 LIMIT 500
             )
             DELETE FROM notes WHERE id IN (SELECT id FROM batch)
