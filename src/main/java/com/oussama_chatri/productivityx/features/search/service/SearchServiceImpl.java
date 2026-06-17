@@ -99,6 +99,7 @@ public class SearchServiceImpl implements SearchService {
         return Arrays.stream(types.split(","))
                 .map(String::trim)
                 .map(String::toUpperCase)
+                .map(t -> t.endsWith("S") ? t.substring(0, t.length() - 1) : t)  // normalize plural: NOTES→NOTE, TASKS→TASK, EVENTS→EVENT
                 .collect(Collectors.toSet());
     }
 
