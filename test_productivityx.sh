@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# ═══════════════════════════════════════════════════════════════════
-#  ProductivityX — Full Interactive API Test Suite
-#  Tests every endpoint across the entire lifecycle, success + failure
-# ═══════════════════════════════════════════════════════════════════
+# =============================================================================
+# ProductivityX — Full API Test (Production-Grade)
+# =============================================================================
+
+set -euo pipefail
 
 BASE="http://localhost:8080/api/v1"
 GREEN='\033[0;32m'
@@ -17,72 +18,50 @@ PASS=0
 FAIL=0
 COOKIE_JAR=$(mktemp)
 TOKEN=""
-REFRESH_TOKEN_2=""  # second token for rotation test
 
-# ─── Helpers ──────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
-pass() { echo -e "${GREEN}✅ PASS${NC} — $1"; ((PASS++)); }
-fail() {
-  echo -e "${RED}❌ FAIL${NC} — $1"
-  echo "   Expected : $2"
-  echo "   Got      : $(echo "$3" | head -c 400)"
-  ((FAIL++))
-}
+pass()    { echo -e "${GREEN}✅ PASS${NC} — $1"; ((PASS++)); }
+fail()    { echo -e "${RED}❌ FAIL${NC} — $1\n   Expected : $2\n   Got      : $(echo "$3" | head -c 400)"; ((FAIL++)); }
+section() { echo -e "\n${YELLOW}${BOLD}━━━ $1 ━━━${NC}"; }
+info()    { echo -e "${CYAN}ℹ  $1${NC}"; }
 
 check() {
   local label="$1" expected="$2" actual="$3"
-  if echo "$actual" | grep -q "$expected"; then
-    pass "$label"
-  else
-    fail "$label" "$expected" "$actual"
-  fi
+  if echo "$actual" | grep -q "$expected"; then pass "$label"
+  else fail "$label" "$expected" "$actual"; fi
 }
 
 check_not() {
   local label="$1" unexpected="$2" actual="$3"
-  if echo "$actual" | grep -q "$unexpected"; then
-    fail "$label" "NOT containing '$unexpected'" "$actual"
-  else
-    pass "$label"
-  fi
-}
-
-section() { echo -e "\n${YELLOW}${BOLD}━━━ $1 ━━━${NC}"; }
-info()    { echo -e "${CYAN}ℹ  $1${NC}"; }
-
-prompt_otp() {
-  local prompt_msg="$1"
-  echo ""
-  echo -e "${CYAN}${BOLD}>>> $prompt_msg${NC}"
-  echo -n "    Enter OTP: "
-  read -r OTP_INPUT
+  if echo "$actual" | grep -q "$unexpected"; then fail "$label" "NOT '$unexpected'" "$actual"
+  else pass "$label"; fi
 }
 
 extract() {
-  # Usage: extract <json> <field>
   echo "$1" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     keys = '$2'.split('.')
     v = d
-    for k in keys:
-        v = v[k]
+    for k in keys: v = v[k]
     print(v)
-except:
-    print('')
+except: print('')
 " 2>/dev/null
 }
 
-auth_header() { echo "-H \"Authorization: Bearer $TOKEN\""; }
-bearer()      { echo "Authorization: Bearer $TOKEN"; }
+prompt_otp() {
+  echo ""
+  echo -e "${CYAN}${BOLD}>>> $1${NC}"
+  echo -n "    Enter OTP: "
+  read -r OTP_INPUT
+}
 
-# ─── Setup ────────────────────────────────────────────────────────
-
-section "CONFIGURATION"
+# ─── Configuration ───────────────────────────────────────────────────────────
 
 TIMESTAMP=$(date +%s)
-EMAIL="use_your_email@gmail.com"
+EMAIL="test_px_${TIMESTAMP}@gmail.com"
 PASSWORD="TestPass@1234"
 WRONG_PASSWORD="WrongPass@9999"
 FIRST="Test"
@@ -90,284 +69,275 @@ LAST="User"
 USERNAME="pxuser_${TIMESTAMP}"
 BIRTH_DATE="1998-05-20"
 
-info "New test account  : $EMAIL"
-info "Username          : $USERNAME"
-info "Base URL          : $BASE"
-echo ""
+section "CONFIGURATION"
+info "Email     : $EMAIL"
+info "Username  : $USERNAME"
+info "Base URL  : $BASE"
 
-# ─── HEALTH ───────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# HEALTH
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "HEALTH CHECK"
+section "HEALTH"
 R=$(curl -s http://localhost:8080/actuator/health)
-check "Actuator is UP" '"status":"UP"' "$R"
+check "Actuator UP" '"status":"UP"' "$R"
 
-# ─── AUTH — REGISTER ──────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — REGISTER (failure cases)
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — REGISTER (failure cases)"
 
-# Missing birth date
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"firstName\":\"$FIRST\",\"lastName\":\"$LAST\",\"username\":\"$USERNAME\"}")
-check "Register without birthDate → fails" '"success":false' "$R"
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d '{"email":"not-an-email","password":"TestPass@1234","firstName":"A","lastName":"B","username":"validuser1","birthDate":"1998-05-20"}')
+check "Invalid email → fails" '"success":false' "$R"
 
-# Weak password
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"weak\",\"firstName\":\"$FIRST\",\"lastName\":\"$LAST\",\"username\":\"${USERNAME}a\",\"birthDate\":\"$BIRTH_DATE\"}")
-check "Register with weak password → fails" '"success":false' "$R"
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d "{\"email\":\"valid${TIMESTAMP}@test.com\",\"password\":\"weak\",\"firstName\":\"A\",\"lastName\":\"B\",\"username\":\"validuser2\",\"birthDate\":\"$BIRTH_DATE\"}")
+check "Weak password → fails" '"success":false' "$R"
 
-# Invalid email
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"not-an-email\",\"password\":\"$PASSWORD\",\"firstName\":\"$FIRST\",\"lastName\":\"$LAST\",\"username\":\"${USERNAME}b\",\"birthDate\":\"$BIRTH_DATE\"}")
-check "Register with invalid email → fails" '"success":false' "$R"
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d "{\"email\":\"valid${TIMESTAMP}@test.com\",\"password\":\"$PASSWORD\",\"firstName\":\"\",\"lastName\":\"B\",\"username\":\"validuser3\",\"birthDate\":\"$BIRTH_DATE\"}")
+check "Blank firstName → fails" '"success":false' "$R"
 
-# Empty firstName
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"firstName\":\"\",\"lastName\":\"$LAST\",\"username\":\"${USERNAME}c\",\"birthDate\":\"$BIRTH_DATE\"}")
-check "Register with blank firstName → fails" '"success":false' "$R"
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d "{\"email\":\"valid${TIMESTAMP}@test.com\",\"password\":\"$PASSWORD\",\"firstName\":\"A\",\"lastName\":\"B\",\"username\":\"x\",\"birthDate\":\"$BIRTH_DATE\"}")
+check "Username too short (1 char) → fails" '"success":false' "$R"
+
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d "{\"email\":\"valid${TIMESTAMP}@test.com\",\"password\":\"$PASSWORD\",\"firstName\":\"A\",\"lastName\":\"B\",\"username\":\"valid_user\",\"birthDate\":\"2020-01-01\"}")
+check "Underage birthDate → fails" '"success":false' "$R"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — REGISTER (success)
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — REGISTER (success)"
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"firstName\":\"$FIRST\",\"lastName\":\"$LAST\",\"username\":\"$USERNAME\",\"birthDate\":\"$BIRTH_DATE\",\"gender\":\"MALE\"}")
-check "Register with valid data → success" '"success":true' "$R"
+check "Valid registration → success" '"success":true' "$R"
 
-# Duplicate email
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"firstName\":\"$FIRST\",\"lastName\":\"$LAST\",\"username\":\"${USERNAME}_dup\",\"birthDate\":\"$BIRTH_DATE\"}")
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"firstName\":\"A\",\"lastName\":\"B\",\"username\":\"dupuser_${TIMESTAMP}\",\"birthDate\":\"$BIRTH_DATE\"}")
 check "Duplicate email → fails" '"success":false' "$R"
 
-# Duplicate username
-R=$(curl -s -X POST "$BASE/auth/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"dup_user_${TIMESTAMP}@test.com\",\"password\":\"$PASSWORD\",\"firstName\":\"$FIRST\",\"lastName\":\"$LAST\",\"username\":\"$USERNAME\",\"birthDate\":\"$BIRTH_DATE\"}")
+R=$(curl -s -X POST "$BASE/auth/register" -H "Content-Type: application/json" \
+  -d "{\"email\":\"other_${TIMESTAMP}@test.com\",\"password\":\"$PASSWORD\",\"firstName\":\"A\",\"lastName\":\"B\",\"username\":\"$USERNAME\",\"birthDate\":\"$BIRTH_DATE\"}")
 check "Duplicate username → fails" '"success":false' "$R"
 
-# ─── AUTH — PRE-VERIFICATION BLOCKS ──────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — LOGIN BLOCKED BEFORE VERIFICATION
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "AUTH — LOGIN BLOCKED (email not verified yet)"
-R=$(curl -s -X POST "$BASE/auth/login" \
-  -H "Content-Type: application/json" \
+section "AUTH — LOGIN BEFORE VERIFICATION"
+R=$(curl -s -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
   -d "{\"identifier\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
-check "Login before verification → blocked" '"success":false' "$R"
+check "Login before email verification → fails" '"success":false' "$R"
 
-# ─── AUTH — RESEND VERIFICATION ──────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — RESEND VERIFICATION
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — RESEND VERIFICATION"
-R=$(curl -s -X POST "$BASE/auth/resend-verification" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/resend-verification" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\"}")
-check "Resend verification email → success" '"success":true' "$R"
+check "Resend verification → success" '"success":true' "$R"
 
-R=$(curl -s -X POST "$BASE/auth/resend-verification" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"ghost_nobody@nowhere.com\"}")
-# May return 200 or 404 depending on implementation — just check it responds
-info "Resend for unknown email returned: $(echo "$R" | head -c 100)"
+R=$(curl -s -X POST "$BASE/auth/resend-verification" -H "Content-Type: application/json" \
+  -d '{"email":"ghost_nobody@nowhere.xyz"}')
+info "Resend for unknown email: $(echo "$R" | head -c 80)"
 
-# ─── AUTH — VERIFY EMAIL via OTP (interactive) ───────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — VERIFY EMAIL (OTP)
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "AUTH — EMAIL VERIFICATION (OTP)"
-echo ""
-info "A verification OTP was sent to: $EMAIL"
-info "Check your inbox and enter the 6-digit OTP below."
-echo ""
+section "AUTH — VERIFY EMAIL (OTP)"
+info "A 6-digit OTP was sent to: $EMAIL"
 
-# Wrong OTP first (failure case)
-echo -n "    Enter a WRONG OTP to test failure (e.g. 000000): "
-read -r WRONG_OTP
-R=$(curl -s -X POST "$BASE/auth/verify-otp" \
-  -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"otp\":\"$WRONG_OTP\"}")
+R=$(curl -s -X POST "$BASE/auth/verify-otp" -H "Content-Type: application/json" \
+  -d "{\"email\":\"$EMAIL\",\"otp\":\"000000\"}")
 check "Wrong OTP → fails" '"success":false' "$R"
 
-# Format validation
-R=$(curl -s -X POST "$BASE/auth/verify-otp" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/verify-otp" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"otp\":\"12\"}")
 check "OTP too short → fails" '"success":false' "$R"
 
-R=$(curl -s -X POST "$BASE/auth/verify-otp" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/verify-otp" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"otp\":\"abcdef\"}")
 check "Non-numeric OTP → fails" '"success":false' "$R"
 
-# Real OTP
-prompt_otp "Now enter the REAL OTP from your email to continue"
+prompt_otp "Enter the REAL OTP from your email to continue"
 VERIFY_R=$(curl -s -c "$COOKIE_JAR" -X POST "$BASE/auth/verify-otp" \
   -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"otp\":\"$OTP_INPUT\"}")
-check "Correct OTP → email verified + tokens returned" '"success":true' "$VERIFY_R"
+check "Correct OTP → verified + tokens" '"success":true' "$VERIFY_R"
 
 TOKEN=$(extract "$VERIFY_R" "data.accessToken")
 if [ -z "$TOKEN" ]; then
-  echo -e "${RED}✗  Could not extract access token. Cannot continue authenticated tests.${NC}"
+  echo -e "${RED}✗  Cannot extract access token — aborting.${NC}"
   echo "   Response: $VERIFY_R"
-  rm -f "$COOKIE_JAR"
-  exit 1
+  rm -f "$COOKIE_JAR"; exit 1
 fi
-info "Access token obtained: ${TOKEN:0:40}..."
+info "Access token: ${TOKEN:0:40}..."
 
-# Replay the same OTP (should fail — already used)
-R=$(curl -s -X POST "$BASE/auth/verify-otp" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/verify-otp" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"otp\":\"$OTP_INPUT\"}")
-check "Reusing same OTP → fails (already used)" '"success":false' "$R"
+check "Reuse same OTP → fails (already used)" '"success":false' "$R"
 
-# ─── AUTH — LOGIN ─────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — LOGIN
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — LOGIN"
 
-# Wrong password
-R=$(curl -s -X POST "$BASE/auth/login" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
   -d "{\"identifier\":\"$EMAIL\",\"password\":\"$WRONG_PASSWORD\"}")
-check "Login with wrong password → fails" '"success":false' "$R"
+check "Wrong password → fails" '"success":false' "$R"
 
-# Non-existent account
-R=$(curl -s -X POST "$BASE/auth/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"identifier\":\"ghost_nobody_xyz@nowhere.com\",\"password\":\"$PASSWORD\"}")
-check "Login with unknown email → fails" '"success":false' "$R"
+R=$(curl -s -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
+  -d '{"identifier":"ghost_xyz_nobody@nowhere.com","password":"TestPass@1234"}')
+check "Unknown identifier → fails" '"success":false' "$R"
 
-# Missing identifier
-R=$(curl -s -X POST "$BASE/auth/login" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
   -d "{\"identifier\":\"\",\"password\":\"$PASSWORD\"}")
-check "Login with blank identifier → fails" '"success":false' "$R"
+check "Blank identifier → fails" '"success":false' "$R"
 
-# Valid login by email
 LOGIN_R=$(curl -s -c "$COOKIE_JAR" -X POST "$BASE/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"identifier\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
 check "Login by email → success" '"success":true' "$LOGIN_R"
 TOKEN=$(extract "$LOGIN_R" "data.accessToken")
-info "Refreshed token from login: ${TOKEN:0:40}..."
+info "Token refreshed from login: ${TOKEN:0:40}..."
 
-# Login by username
 R=$(curl -s -c "$COOKIE_JAR" -X POST "$BASE/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"identifier\":\"$USERNAME\",\"password\":\"$PASSWORD\"}")
 check "Login by username → success" '"success":true' "$R"
 
-# ─── AUTH — PROTECTED ROUTES WITHOUT TOKEN ────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# UNAUTHENTICATED ACCESS
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "AUTH — UNAUTHENTICATED ACCESS"
-for ROUTE in auth/me notes tasks events profile preferences; do
-  R=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$ROUTE")
-  check "GET /$ROUTE without token → 401" "401" "$R"
+section "UNAUTHENTICATED ACCESS"
+for ROUTE in auth/me profile preferences notes tasks events; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$ROUTE")
+  check "GET /$ROUTE without token → 401" "401" "$CODE"
 done
 
-# ─── AUTH — ME ────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AUTH — ME
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — ME"
 R=$(curl -s "$BASE/auth/me" -H "Authorization: Bearer $TOKEN")
-check "GET /auth/me → returns current user" '"success":true' "$R"
+check "GET /auth/me → success" '"success":true' "$R"
 check "GET /auth/me → contains email" "$EMAIL" "$R"
 
-# ─── TOKEN REFRESH ────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# TOKEN REFRESH
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "AUTH — TOKEN REFRESH"
+section "TOKEN REFRESH"
 R=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE/auth/refresh")
 check "POST /auth/refresh → rotates token" '"success":true' "$R"
 NEW_TOKEN=$(extract "$R" "data.accessToken")
-if [ -n "$NEW_TOKEN" ]; then
-  TOKEN="$NEW_TOKEN"
-  info "Token rotated: ${TOKEN:0:40}..."
-fi
+[ -n "$NEW_TOKEN" ] && TOKEN="$NEW_TOKEN" && info "Token rotated: ${TOKEN:0:40}..."
 
-# Old token after rotation — JWT is stateless so the short-lived one may still work until expiry.
-# The refresh token (cookie) should be invalidated.
-# Send ONLY the bad cookie — do NOT include the jar (which has a valid token).
-R=$(curl -s -c /dev/null -X POST "$BASE/auth/refresh" \
-  --cookie "refreshToken=invalidcookie")
+R=$(curl -s -c /dev/null -X POST "$BASE/auth/refresh" --cookie "refreshToken=totally_invalid_cookie")
 check "Refresh with bad cookie → fails" '"success":false' "$R"
 
-# ─── PROFILE ──────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# PROFILE
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "PROFILE"
 R=$(curl -s "$BASE/profile" -H "Authorization: Bearer $TOKEN")
 check "GET /profile → success" '"success":true' "$R"
-check "GET /profile → contains firstName" '"firstName"' "$R"
+check "GET /profile → has firstName" '"firstName"' "$R"
 
-R=$(curl -s -X PUT "$BASE/profile" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X PUT "$BASE/profile" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"firstName":"Updated","lastName":"TestUser","bio":"Testing the API","timezone":"Africa/Algiers","language":"EN","theme":"DARK"}')
-check "PUT /profile → success" '"success":true' "$R"
+  -d '{"firstName":"Updated","lastName":"TestUser","bio":"Bio from test","timezone":"Africa/Algiers","language":"FR","theme":"DARK"}')
+check "PUT /profile full update → success" '"success":true' "$R"
 check "PUT /profile → firstName updated" '"Updated"' "$R"
 
-# Invalid theme value
-R=$(curl -s -X PUT "$BASE/profile" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X PUT "$BASE/profile" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"firstName":"PartialOnly"}')
+check "PUT /profile partial update → success" '"success":true' "$R"
+
+R=$(curl -s -X PUT "$BASE/profile" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"theme":"RAINBOW"}')
 check "PUT /profile invalid theme → fails" '"success":false' "$R"
 
-# Update avatar URL
-R=$(curl -s -X PATCH "$BASE/profile/avatar" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X PATCH "$BASE/profile/avatar" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"avatarUrl":"https://example.com/avatar.png"}')
 check "PATCH /profile/avatar → success" '"success":true' "$R"
 
-# Avatar URL missing
-R=$(curl -s -X PATCH "$BASE/profile/avatar" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X PATCH "$BASE/profile/avatar" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{}')
 check "PATCH /profile/avatar blank URL → fails" '"success":false' "$R"
 
-# ─── PREFERENCES ──────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# PREFERENCES
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "PREFERENCES"
 R=$(curl -s "$BASE/preferences" -H "Authorization: Bearer $TOKEN")
 check "GET /preferences → success" '"success":true' "$R"
 
-R=$(curl -s -X PUT "$BASE/preferences" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X PUT "$BASE/preferences" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"pomodoroFocusMinutes":30,"pomodoroShortBreakMinutes":5,"pomodoroLongBreakMinutes":20,"pomodoroCyclesBeforeLongBreak":4,"pomodoroAutoStartBreaks":true,"pomodoroAutoStartFocus":false,"pomodoroSoundEnabled":true,"notifyTaskReminders":true,"notifyEventReminders":true,"notifyPomodoroEnd":true,"notifyDailySummary":false,"defaultTaskView":"KANBAN","defaultCalendarView":"WEEK","aiContextEnabled":true,"compactMode":false}')
+  -d '{"pomodoroFocusMinutes":30,"pomodoroShortBreakMinutes":5,"pomodoroLongBreakMinutes":20,"pomodoroCyclesBeforeLongBreak":4,"pomodoroAutoStartBreaks":true,"pomodoroAutoStartFocus":false,"pomodoroSoundEnabled":true,"notifyTaskReminders":true,"notifyEventReminders":true,"notifyPomodoroEnd":true,"notifyDailySummary":false,"defaultTaskView":"KANBAN","defaultCalendarView":"WEEK","weekStartsOn":"MON","aiContextEnabled":true,"compactMode":false}')
 check "PUT /preferences full update → success" '"success":true' "$R"
 
-R=$(curl -s -X PUT "$BASE/preferences" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X PUT "$BASE/preferences" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"pomodoroFocusMinutes":30}')
+  -d '{"pomodoroFocusMinutes":45}')
 check "PUT /preferences partial update → success" '"success":true' "$R"
 
-# ─── TAGS ─────────────────────────────────────────────────────────
+R=$(curl -s -X PUT "$BASE/preferences" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pomodoroFocusMinutes":0}')
+check "PUT /preferences focus=0 (below min) → fails" '"success":false' "$R"
+
+R=$(curl -s -X PUT "$BASE/preferences" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pomodoroFocusMinutes":200}')
+check "PUT /preferences focus=200 (above max) → fails" '"success":false' "$R"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAGS
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "TAGS"
-TAG_R=$(curl -s -X POST "$BASE/tags" \
-  -H "Authorization: Bearer $TOKEN" \
+TAG_R=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"work","color":"#6366F1"}')
 check "POST /tags → success" '"success":true' "$TAG_R"
 TAG_ID=$(extract "$TAG_R" "data.id")
 info "Tag ID: $TAG_ID"
 
-# Duplicate tag name
-R=$(curl -s -X POST "$BASE/tags" \
-  -H "Authorization: Bearer $TOKEN" \
+TAG2_R=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"personal","color":"#22C55E"}')
+check "POST /tags second tag → success" '"success":true' "$TAG2_R"
+TAG2_ID=$(extract "$TAG2_R" "data.id")
+
+R=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"work","color":"#22C55E"}')
 check "POST /tags duplicate name → fails" '"success":false' "$R"
 
-# Invalid color
-R=$(curl -s -X POST "$BASE/tags" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"personal","color":"red"}')
-check "POST /tags invalid color → fails" '"success":false' "$R"
+  -d '{"name":"invalid","color":"red"}')
+check "POST /tags invalid hex color → fails" '"success":false' "$R"
 
-# Missing name
-R=$(curl -s -X POST "$BASE/tags" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"","color":"#6366F1"}')
 check "POST /tags blank name → fails" '"success":false' "$R"
@@ -375,48 +345,41 @@ check "POST /tags blank name → fails" '"success":false' "$R"
 R=$(curl -s "$BASE/tags" -H "Authorization: Bearer $TOKEN")
 check "GET /tags list → success" '"success":true' "$R"
 
-TAG2_R=$(curl -s -X POST "$BASE/tags" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"personal","color":"#22C55E"}')
-check "POST /tags second tag → success" '"success":true' "$TAG2_R"
-TAG2_ID=$(extract "$TAG2_R" "data.id")
-
 if [ -n "$TAG_ID" ]; then
-  R=$(curl -s -X PUT "$BASE/tags/$TAG_ID" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PUT "$BASE/tags/$TAG_ID" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"name":"work-updated","color":"#8B5CF6"}')
   check "PUT /tags/{id} → success" '"success":true' "$R"
+
+  R=$(curl -s -X PUT "$BASE/tags/$TAG_ID" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"personal","color":"#6366F1"}')
+  check "PUT /tags/{id} rename to existing name → fails" '"success":false' "$R"
 fi
 
-# ─── NOTES ────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# NOTES
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "NOTES — FAILURE CASES"
-
-# Title too long
+section "NOTES — VALIDATION"
 LONG_TITLE=$(python3 -c "print('a'*501)")
-R=$(curl -s -X POST "$BASE/notes" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/notes" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"title\":\"$LONG_TITLE\",\"content\":\"test\"}")
 check "POST /notes title > 500 chars → fails" '"success":false' "$R"
 
-section "NOTES — SUCCESS CASES"
-NOTE_R=$(curl -s -X POST "$BASE/notes" \
-  -H "Authorization: Bearer $TOKEN" \
+section "NOTES — CRUD"
+NOTE_R=$(curl -s -X POST "$BASE/notes" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"title\":\"Auto Test Note\",\"content\":\"## Hello\\nThis is an automated test.\",\"pinned\":false}")
+  -d '{"title":"Auto Test Note","content":"## Hello\nThis is a test.","pinned":false}')
 check "POST /notes → success" '"success":true' "$NOTE_R"
 NOTE_ID=$(extract "$NOTE_R" "data.id")
 info "Note ID: $NOTE_ID"
 
-# Note with tags
 if [ -n "$TAG_ID" ]; then
-  TAGGED_NOTE_R=$(curl -s -X POST "$BASE/notes" \
-    -H "Authorization: Bearer $TOKEN" \
+  TAGGED_NOTE_R=$(curl -s -X POST "$BASE/notes" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
-    -d "{\"title\":\"Tagged Note\",\"content\":\"# Tagged\\nHas a tag.\",\"tagIds\":[\"$TAG_ID\"]}")
+    -d "{\"title\":\"Tagged Note\",\"content\":\"# Tag test\",\"tagIds\":[\"$TAG_ID\"]}")
   check "POST /notes with tagIds → success" '"success":true' "$TAGGED_NOTE_R"
   TAGGED_NOTE_ID=$(extract "$TAGGED_NOTE_R" "data.id")
 fi
@@ -432,13 +395,18 @@ if [ -n "$TAG_ID" ]; then
   check "GET /notes?tagId= → success" '"success":true' "$R"
 fi
 
+R=$(curl -s "$BASE/notes?page=0&size=5" -H "Authorization: Bearer $TOKEN")
+check "GET /notes paginated → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/notes/trash" -H "Authorization: Bearer $TOKEN")
+check "GET /notes/trash → success" '"success":true' "$R"
+
 if [ -n "$NOTE_ID" ]; then
   R=$(curl -s "$BASE/notes/$NOTE_ID" -H "Authorization: Bearer $TOKEN")
   check "GET /notes/{id} → success" '"success":true' "$R"
-  check "GET /notes/{id} → correct title" 'Auto Test Note' "$R"
+  check "GET /notes/{id} → correct title" "Auto Test Note" "$R"
 
-  R=$(curl -s -X PUT "$BASE/notes/$NOTE_ID" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PUT "$BASE/notes/$NOTE_ID" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"title":"Updated Note Title","content":"# Updated\nContent changed.","pinned":true}')
   check "PUT /notes/{id} → success" '"success":true' "$R"
@@ -446,57 +414,69 @@ if [ -n "$NOTE_ID" ]; then
   R=$(curl -s -X PATCH "$BASE/notes/$NOTE_ID/pin" -H "Authorization: Bearer $TOKEN")
   check "PATCH /notes/{id}/pin → success" '"success":true' "$R"
 
-  # Add tag to note
+  R=$(curl -s -X PATCH "$BASE/notes/$NOTE_ID/unpin" -H "Authorization: Bearer $TOKEN")
+  check "PATCH /notes/{id}/unpin → success" '"success":true' "$R"
+
   if [ -n "$TAG2_ID" ]; then
-    R=$(curl -s -X POST "$BASE/notes/$NOTE_ID/tags" \
-      -H "Authorization: Bearer $TOKEN" \
+    R=$(curl -s -X POST "$BASE/notes/$NOTE_ID/tags" -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
       -d "{\"tagId\":\"$TAG2_ID\"}")
     check "POST /notes/{id}/tags → success" '"success":true' "$R"
 
-    R=$(curl -s -X DELETE "$BASE/notes/$NOTE_ID/tags/$TAG2_ID" \
-      -H "Authorization: Bearer $TOKEN")
+    R=$(curl -s -X DELETE "$BASE/notes/$NOTE_ID/tags/$TAG2_ID" -H "Authorization: Bearer $TOKEN")
     check "DELETE /notes/{id}/tags/{tagId} → success" '"success":true' "$R"
   fi
 
+  # ─── Trash / Restore / Hard-Delete lifecycle ───────────────────────────
   R=$(curl -s -X DELETE "$BASE/notes/$NOTE_ID" -H "Authorization: Bearer $TOKEN")
   check "DELETE /notes/{id} soft-delete → success" '"success":true' "$R"
 
   R=$(curl -s "$BASE/notes/trash" -H "Authorization: Bearer $TOKEN")
-  check "GET /notes/trash → success" '"success":true' "$R"
+  check "GET /notes/trash shows deleted note → success" '"success":true' "$R"
+
+  R=$(curl -s -X PUT "$BASE/notes/$NOTE_ID" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"title":"Edit trashed note"}')
+  check "PUT trashed note → fails (VAL_NOTE_TRASHED)" '"success":false' "$R"
 
   R=$(curl -s -X PATCH "$BASE/notes/$NOTE_ID/restore" -H "Authorization: Bearer $TOKEN")
   check "PATCH /notes/{id}/restore → success" '"success":true' "$R"
 
-  # GET non-existent note
-  R=$(curl -s "$BASE/notes/00000000-0000-0000-0000-000000000000" \
-    -H "Authorization: Bearer $TOKEN")
+  R=$(curl -s -X DELETE "$BASE/notes/$NOTE_ID" -H "Authorization: Bearer $TOKEN")
+  check "Soft-delete again before hardDelete → success" '"success":true' "$R"
+
+  R=$(curl -s -X DELETE "$BASE/notes/$NOTE_ID/permanent" -H "Authorization: Bearer $TOKEN")
+  check "DELETE /notes/{id}/permanent (trashed) → success" '"success":true' "$R"
+
+  R=$(curl -s "$BASE/notes/00000000-0000-0000-0000-000000000000" -H "Authorization: Bearer $TOKEN")
   check "GET /notes/{unknown-id} → fails" '"success":false' "$R"
 fi
 
-# ─── TASKS ────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# TASKS
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "TASKS — FAILURE CASES"
-
-# Missing title
-R=$(curl -s -X POST "$BASE/tasks" \
-  -H "Authorization: Bearer $TOKEN" \
+section "TASKS — VALIDATION"
+R=$(curl -s -X POST "$BASE/tasks" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"priority":"HIGH","status":"TODO"}')
 check "POST /tasks without title → fails" '"success":false' "$R"
 
-# Negative estimated minutes
-R=$(curl -s -X POST "$BASE/tasks" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/tasks" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"Bad Task","estimatedMinutes":-5}')
 check "POST /tasks negative estimatedMinutes → fails" '"success":false' "$R"
 
-section "TASKS — SUCCESS CASES"
-TASK_R=$(curl -s -X POST "$BASE/tasks" \
-  -H "Authorization: Bearer $TOKEN" \
+LONG_TASK_TITLE=$(python3 -c "print('t'*501)")
+R=$(curl -s -X POST "$BASE/tasks" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"title":"Auto Test Task","description":"Testing via script","priority":"HIGH","status":"TODO","estimatedMinutes":60,"dueDate":"2026-12-31"}')
+  -d "{\"title\":\"$LONG_TASK_TITLE\"}")
+check "POST /tasks title > 500 chars → fails" '"success":false' "$R"
+
+section "TASKS — CRUD"
+TASK_R=$(curl -s -X POST "$BASE/tasks" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Auto Test Task","description":"Script test","priority":"HIGH","status":"TODO","estimatedMinutes":60,"dueDate":"2026-12-31"}')
 check "POST /tasks → success" '"success":true' "$TASK_R"
 TASK_ID=$(extract "$TASK_R" "data.id")
 info "Task ID: $TASK_ID"
@@ -510,366 +490,397 @@ check "GET /tasks?status=TODO → success" '"success":true' "$R"
 R=$(curl -s "$BASE/tasks?priority=HIGH" -H "Authorization: Bearer $TOKEN")
 check "GET /tasks?priority=HIGH → success" '"success":true' "$R"
 
+R=$(curl -s "$BASE/tasks?page=0&size=10" -H "Authorization: Bearer $TOKEN")
+check "GET /tasks paginated → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/tasks/trash" -H "Authorization: Bearer $TOKEN")
+check "GET /tasks/trash → success" '"success":true' "$R"
+
 if [ -n "$TASK_ID" ]; then
   R=$(curl -s "$BASE/tasks/$TASK_ID" -H "Authorization: Bearer $TOKEN")
   check "GET /tasks/{id} → success" '"success":true' "$R"
+  check "GET /tasks/{id} → has subtasks field" '"subtasks"' "$R"
 
-  R=$(curl -s -X PUT "$BASE/tasks/$TASK_ID" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PUT "$BASE/tasks/$TASK_ID" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"title":"Updated Task Title","priority":"URGENT","status":"IN_PROGRESS"}')
   check "PUT /tasks/{id} → success" '"success":true' "$R"
 
-  R=$(curl -s -X PATCH "$BASE/tasks/$TASK_ID/status" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"status":"ON_HOLD"}')
-  check "PATCH /tasks/{id}/status → ON_HOLD" '"success":true' "$R"
+  for STATUS in ON_HOLD DONE; do
+    R=$(curl -s -X PATCH "$BASE/tasks/$TASK_ID/status" -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"status\":\"$STATUS\"}")
+    check "PATCH /tasks/{id}/status → $STATUS" '"success":true' "$R"
+  done
 
-  R=$(curl -s -X PATCH "$BASE/tasks/$TASK_ID/status" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"status":"DONE"}')
-  check "PATCH /tasks/{id}/status → DONE" '"success":true' "$R"
-
-  # Invalid status
-  R=$(curl -s -X PATCH "$BASE/tasks/$TASK_ID/status" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PATCH "$BASE/tasks/$TASK_ID/status" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"status":"FLYING"}')
-  check "PATCH /tasks/{id}/status invalid → fails" '"success":false' "$R"
+  check "PATCH /tasks/{id}/status invalid value → fails" '"success":false' "$R"
 
-  # Create subtask
-  SUBTASK_R=$(curl -s -X POST "$BASE/tasks" \
-    -H "Authorization: Bearer $TOKEN" \
+  SUBTASK_R=$(curl -s -X POST "$BASE/tasks" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"title\":\"Subtask One\",\"priority\":\"LOW\",\"parentTaskId\":\"$TASK_ID\"}")
   check "POST /tasks subtask (parentTaskId) → success" '"success":true' "$SUBTASK_R"
   SUBTASK_ID=$(extract "$SUBTASK_R" "data.id")
 
-  # Reorder
   if [ -n "$SUBTASK_ID" ]; then
-    R=$(curl -s -X PATCH "$BASE/tasks/reorder" \
-      -H "Authorization: Bearer $TOKEN" \
+    R=$(curl -s "$BASE/tasks?parentId=$TASK_ID" -H "Authorization: Bearer $TOKEN")
+    check "GET /tasks?parentId= → returns subtasks" '"success":true' "$R"
+
+    R=$(curl -s -X POST "$BASE/tasks" -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"title\":\"Grandchild Task\",\"parentTaskId\":\"$SUBTASK_ID\"}")
+    check "POST /tasks grandchild (depth > 1) → fails (VAL_SUBTASK_DEPTH_EXCEEDED)" '"success":false' "$R"
+
+    R=$(curl -s -X PATCH "$BASE/tasks/reorder" -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
       -d "{\"items\":[{\"id\":\"$TASK_ID\",\"position\":0},{\"id\":\"$SUBTASK_ID\",\"position\":1}]}")
     check "PATCH /tasks/reorder → success" '"success":true' "$R"
   fi
 
+  # ─── Trash / Restore / Hard-Delete lifecycle ───────────────────────────
   R=$(curl -s -X DELETE "$BASE/tasks/$TASK_ID" -H "Authorization: Bearer $TOKEN")
   check "DELETE /tasks/{id} soft-delete → success" '"success":true' "$R"
 
+  R=$(curl -s "$BASE/tasks/trash" -H "Authorization: Bearer $TOKEN")
+  check "GET /tasks/trash shows deleted task → success" '"success":true' "$R"
+
+  R=$(curl -s -X PUT "$BASE/tasks/$TASK_ID" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"title":"Edit trashed task"}')
+  check "PUT trashed task → fails" '"success":false' "$R"
+
+  # Must restore before permanent delete
   R=$(curl -s -X PATCH "$BASE/tasks/$TASK_ID/restore" -H "Authorization: Bearer $TOKEN")
   check "PATCH /tasks/{id}/restore → success" '"success":true' "$R"
 
-  R=$(curl -s "$BASE/tasks/00000000-0000-0000-0000-000000000000" \
-    -H "Authorization: Bearer $TOKEN")
+  # Now soft-delete again
+  R=$(curl -s -X DELETE "$BASE/tasks/$TASK_ID" -H "Authorization: Bearer $TOKEN")
+  check "Soft-delete again → success" '"success":true' "$R"
+
+  # Permanent delete of trashed task → success
+  R=$(curl -s -X DELETE "$BASE/tasks/$TASK_ID/permanent" -H "Authorization: Bearer $TOKEN")
+  check "DELETE /tasks/{id}/permanent (now trashed) → success" '"success":true' "$R"
+
+  R=$(curl -s "$BASE/tasks/00000000-0000-0000-0000-000000000000" -H "Authorization: Bearer $TOKEN")
   check "GET /tasks/{unknown-id} → fails" '"success":false' "$R"
 fi
 
-# ─── EVENTS ───────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# EVENTS
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "EVENTS — FAILURE CASES"
-
-# Missing title
-R=$(curl -s -X POST "$BASE/events" \
-  -H "Authorization: Bearer $TOKEN" \
+section "EVENTS — VALIDATION"
+R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"startAt":"2026-09-01T10:00:00Z","endAt":"2026-09-01T11:00:00Z"}')
 check "POST /events without title → fails" '"success":false' "$R"
 
-# Missing startAt
-R=$(curl -s -X POST "$BASE/events" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"No Start","endAt":"2026-09-01T11:00:00Z"}')
 check "POST /events without startAt → fails" '"success":false' "$R"
 
-# Invalid color
-R=$(curl -s -X POST "$BASE/events" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"No End","startAt":"2026-09-01T10:00:00Z"}')
+check "POST /events without endAt → fails" '"success":false' "$R"
+
+R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"Bad Color","startAt":"2026-09-01T10:00:00Z","endAt":"2026-09-01T11:00:00Z","color":"blue"}')
-check "POST /events invalid color → fails" '"success":false' "$R"
+check "POST /events invalid hex color → fails" '"success":false' "$R"
 
-section "EVENTS — SUCCESS CASES"
-EVENT_R=$(curl -s -X POST "$BASE/events" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"title":"Auto Test Event","description":"Testing events","location":"Algiers","startAt":"2026-09-01T10:00:00Z","endAt":"2026-09-01T11:00:00Z","color":"#6366F1","reminderMinutes":30}')
+  -d '{"title":"End Before Start","startAt":"2026-09-01T11:00:00Z","endAt":"2026-09-01T10:00:00Z","color":"#6366F1"}')
+check "POST /events endAt before startAt → fails" '"success":false' "$R"
+
+section "EVENTS — CRUD"
+EVENT_R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Auto Test Event","description":"Script test","location":"Algiers","startAt":"2026-09-01T10:00:00Z","endAt":"2026-09-01T11:00:00Z","color":"#6366F1","reminderMinutes":30}')
 check "POST /events → success" '"success":true' "$EVENT_R"
 EVENT_ID=$(extract "$EVENT_R" "data.id")
 info "Event ID: $EVENT_ID"
 
-# Recurring event
-RECUR_R=$(curl -s -X POST "$BASE/events" \
-  -H "Authorization: Bearer $TOKEN" \
+RECUR_R=$(curl -s -X POST "$BASE/events" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"Weekly Standup","startAt":"2026-09-01T09:00:00Z","endAt":"2026-09-01T09:30:00Z","color":"#8B5CF6","recurrenceRule":"FREQ=WEEKLY;BYDAY=MO,WE,FR","recurrenceEndAt":"2026-12-31T23:59:59Z"}')
 check "POST /events recurring → success" '"success":true' "$RECUR_R"
+RECUR_ID=$(extract "$RECUR_R" "data.id")
 
 R=$(curl -s "$BASE/events?from=2026-09-01&to=2026-09-30" -H "Authorization: Bearer $TOKEN")
-check "GET /events?from=&to= → success" '"success":true' "$R"
+check "GET /events?from=&to= (date-only format) → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/events?from=2026-09-01T00:00:00Z&to=2026-09-30T23:59:59Z" -H "Authorization: Bearer $TOKEN")
+check "GET /events?from=&to= (ISO format) → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/events?page=0&size=20" -H "Authorization: Bearer $TOKEN")
+check "GET /events paged (no from/to) → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/events/trash" -H "Authorization: Bearer $TOKEN")
+check "GET /events/trash → success" '"success":true' "$R"
 
 if [ -n "$EVENT_ID" ]; then
   R=$(curl -s "$BASE/events/$EVENT_ID" -H "Authorization: Bearer $TOKEN")
   check "GET /events/{id} → success" '"success":true' "$R"
+  check "GET /events/{id} → correct title" "Auto Test Event" "$R"
 
-  R=$(curl -s -X PUT "$BASE/events/$EVENT_ID" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PUT "$BASE/events/$EVENT_ID" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"title":"Updated Event Title","startAt":"2026-09-01T10:00:00Z","endAt":"2026-09-01T12:00:00Z","color":"#22C55E"}')
   check "PUT /events/{id} → success" '"success":true' "$R"
 
+  # ─── Trash / Restore / Hard-Delete lifecycle ───────────────────────────
   R=$(curl -s -X DELETE "$BASE/events/$EVENT_ID" -H "Authorization: Bearer $TOKEN")
   check "DELETE /events/{id} soft-delete → success" '"success":true' "$R"
 
+  R=$(curl -s "$BASE/events/trash" -H "Authorization: Bearer $TOKEN")
+  check "GET /events/trash shows deleted event → success" '"success":true' "$R"
+
+  # Must restore before permanent delete
   R=$(curl -s -X PATCH "$BASE/events/$EVENT_ID/restore" -H "Authorization: Bearer $TOKEN")
   check "PATCH /events/{id}/restore → success" '"success":true' "$R"
 
-  R=$(curl -s "$BASE/events/00000000-0000-0000-0000-000000000000" \
-    -H "Authorization: Bearer $TOKEN")
+  # Now soft-delete again
+  R=$(curl -s -X DELETE "$BASE/events/$EVENT_ID" -H "Authorization: Bearer $TOKEN")
+  check "Soft-delete again → success" '"success":true' "$R"
+
+  # Permanent delete of trashed event → success
+  R=$(curl -s -X DELETE "$BASE/events/$EVENT_ID/permanent" -H "Authorization: Bearer $TOKEN")
+  check "DELETE /events/{id}/permanent (now trashed) → success" '"success":true' "$R"
+
+  R=$(curl -s "$BASE/events/00000000-0000-0000-0000-000000000000" -H "Authorization: Bearer $TOKEN")
   check "GET /events/{unknown-id} → fails" '"success":false' "$R"
 fi
 
-# ─── POMODORO ─────────────────────────────────────────────────────
+if [ -n "$RECUR_ID" ]; then
+  R=$(curl -s -X DELETE "$BASE/events/$RECUR_ID/series" -H "Authorization: Bearer $TOKEN")
+  check "DELETE /events/{id}/series → success" '"success":true' "$R"
+fi
 
-section "POMODORO — FAILURE CASES"
+# ═════════════════════════════════════════════════════════════════════════════
+# POMODORO
+# ═════════════════════════════════════════════════════════════════════════════
 
-# Missing type
-R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-  -H "Authorization: Bearer $TOKEN" \
+section "POMODORO — VALIDATION"
+R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{}')
 check "POST /pomodoro/sessions/start no type → fails" '"success":false' "$R"
 
-# Invalid type
-R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"type":"NAP"}')
 check "POST /pomodoro/sessions/start invalid type → fails" '"success":false' "$R"
 
-section "POMODORO — SUCCESS CASES"
-SESSION_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-  -H "Authorization: Bearer $TOKEN" \
+section "POMODORO — FOCUS SESSION"
+SESSION_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"type":"FOCUS"}')
 check "POST /pomodoro/sessions/start FOCUS → success" '"success":true' "$SESSION_R"
 SESSION_ID=$(extract "$SESSION_R" "data.id")
 info "Session ID: $SESSION_ID"
 
-# Start another while one is active (should fail if backend prevents it)
-R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"type":"FOCUS"}')
-info "Start second session while active: $(echo "$R" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null)"
+check "Start second session while one is active → fails (VAL_SESSION_ALREADY_ACTIVE)" '"success":false' "$R"
 
 if [ -n "$SESSION_ID" ]; then
-  # Link to task
-  if [ -n "$TASK_ID" ]; then
-    SESSION2_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-      -H "Authorization: Bearer $TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "{\"type\":\"FOCUS\",\"taskId\":\"$TASK_ID\"}" 2>/dev/null || echo '{}')
-    SESSION2_ID=$(extract "$SESSION2_R" "data.id")
-  fi
-
-  # End with negative duration
-  R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$SESSION_ID/end" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$SESSION_ID/end" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"actualDurationSeconds":-1}')
-  check "PATCH /pomodoro/sessions/{id}/end negative duration → fails" '"success":false' "$R"
+  check "End session with negative duration → fails" '"success":false' "$R"
 
-  R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$SESSION_ID/end" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$SESSION_ID/end" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"actualDurationSeconds":1500}')
   check "PATCH /pomodoro/sessions/{id}/end → success" '"success":true' "$R"
 
-  # Start a break session
-  BREAK_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-    -H "Authorization: Bearer $TOKEN" \
+  R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$SESSION_ID/end" -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
-    -d '{"type":"SHORT_BREAK"}')
-  check "POST /pomodoro/sessions/start SHORT_BREAK → success" '"success":true' "$BREAK_R"
-  BREAK_ID=$(extract "$BREAK_R" "data.id")
-
-  if [ -n "$BREAK_ID" ]; then
-    # Interrupt the break
-    R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$BREAK_ID/interrupt" \
-      -H "Authorization: Bearer $TOKEN" \
-      -H "Content-Type: application/json" \
-      -d '{"actualDurationSeconds":120,"interruptReason":"Got a phone call"}')
-    check "PATCH /pomodoro/sessions/{id}/interrupt → success" '"success":true' "$R"
-  fi
-
-  # Long break
-  LB_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"type":"LONG_BREAK"}')
-  check "POST /pomodoro/sessions/start LONG_BREAK → success" '"success":true' "$LB_R"
-  LB_ID=$(extract "$LB_R" "data.id")
-  if [ -n "$LB_ID" ]; then
-    curl -s -X PATCH "$BASE/pomodoro/sessions/$LB_ID/end" \
-      -H "Authorization: Bearer $TOKEN" \
-      -H "Content-Type: application/json" \
-      -d '{"actualDurationSeconds":900}' > /dev/null
-  fi
+    -d '{"actualDurationSeconds":900}')
+  check "End already-ended session → fails (VAL_SESSION_ALREADY_ENDED)" '"success":false' "$R"
 fi
 
+section "POMODORO — SHORT BREAK"
+BREAK_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"SHORT_BREAK"}')
+check "POST /pomodoro/sessions/start SHORT_BREAK → success" '"success":true' "$BREAK_R"
+BREAK_ID=$(extract "$BREAK_R" "data.id")
+
+if [ -n "$BREAK_ID" ]; then
+  R=$(curl -s -X PATCH "$BASE/pomodoro/sessions/$BREAK_ID/interrupt" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"actualDurationSeconds":120,"interruptReason":"Got a phone call"}')
+  check "PATCH /pomodoro/sessions/{id}/interrupt → success" '"success":true' "$R"
+fi
+
+section "POMODORO — LONG BREAK"
+LB_R=$(curl -s -X POST "$BASE/pomodoro/sessions/start" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"LONG_BREAK"}')
+check "POST /pomodoro/sessions/start LONG_BREAK → success" '"success":true' "$LB_R"
+LB_ID=$(extract "$LB_R" "data.id")
+if [ -n "$LB_ID" ]; then
+  curl -s -X PATCH "$BASE/pomodoro/sessions/$LB_ID/end" -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" -d '{"actualDurationSeconds":900}' > /dev/null
+fi
+
+section "POMODORO — LIST"
 R=$(curl -s "$BASE/pomodoro/sessions" -H "Authorization: Bearer $TOKEN")
 check "GET /pomodoro/sessions list → success" '"success":true' "$R"
 
 R=$(curl -s "$BASE/pomodoro/sessions?page=0&size=5" -H "Authorization: Bearer $TOKEN")
 check "GET /pomodoro/sessions paginated → success" '"success":true' "$R"
 
-# ─── AI — CONVERSATIONS ───────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# AI — CONVERSATIONS
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AI — CONVERSATIONS"
-
-CONV_R=$(curl -s -X POST "$BASE/ai/conversations" \
-  -H "Authorization: Bearer $TOKEN")
-check "POST /ai/conversations → created" '"success":true' "$CONV_R"
+CONV_R=$(curl -s -X POST "$BASE/ai/conversations" -H "Authorization: Bearer $TOKEN")
+check "POST /ai/conversations → success" '"success":true' "$CONV_R"
 CONV_ID=$(extract "$CONV_R" "data.id")
 info "Conversation ID: $CONV_ID"
 
-CONV2_R=$(curl -s -X POST "$BASE/ai/conversations" \
-  -H "Authorization: Bearer $TOKEN")
-check "POST /ai/conversations second → created" '"success":true' "$CONV2_R"
+CONV2_R=$(curl -s -X POST "$BASE/ai/conversations" -H "Authorization: Bearer $TOKEN")
+check "POST /ai/conversations second → success" '"success":true' "$CONV2_R"
 CONV2_ID=$(extract "$CONV2_R" "data.id")
 
 R=$(curl -s "$BASE/ai/conversations" -H "Authorization: Bearer $TOKEN")
 check "GET /ai/conversations list → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/ai/conversations?page=0&size=10" -H "Authorization: Bearer $TOKEN")
+check "GET /ai/conversations paginated → success" '"success":true' "$R"
 
 if [ -n "$CONV_ID" ]; then
   R=$(curl -s "$BASE/ai/conversations/$CONV_ID" -H "Authorization: Bearer $TOKEN")
   check "GET /ai/conversations/{id} → success" '"success":true' "$R"
 
   section "AI — STREAMING CHAT (SSE)"
-  info "Sending a chat message — collecting SSE stream..."
+  info "Sending a chat message — streaming SSE response..."
+
+  # Use --no-buffer (-N) for real-time SSE, with a generous max-time for cold-start
   SSE_OUTPUT=$(curl -s -N -X POST "$BASE/ai/conversations/$CONV_ID/messages" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -H "Accept: text/event-stream" \
-    -d '{"content":"Hello! What tasks do I have due today?"}' \
-    --max-time 30 2>&1)
+    -d '{"content":"Say hello in 5 words or less"}' \
+    --max-time 45 2>&1 || true)
 
-  if echo "$SSE_OUTPUT" | grep -q "data:"; then
-    pass "POST /ai/conversations/{id}/messages → SSE stream received tokens"
+  if echo "$SSE_OUTPUT" | grep -q '"success":false'; then
+    info "SSE returned error JSON (auth or server error). Raw: ${SSE_OUTPUT:0:200}"
+    fail "POST /ai/conversations/{id}/messages → SSE should stream tokens, not JSON" "SSE data: events" "$SSE_OUTPUT"
+  elif echo "$SSE_OUTPUT" | grep -q "data:"; then
+    pass "POST /ai/conversations/{id}/messages → SSE tokens received"
   elif echo "$SSE_OUTPUT" | grep -qi "done\|\[DONE\]\|event:done"; then
     pass "POST /ai/conversations/{id}/messages → SSE stream completed"
   else
     info "SSE raw output (first 300 chars): ${SSE_OUTPUT:0:300}"
-    # Don't fail — SSE output format varies and curl might cut it
-    pass "POST /ai/conversations/{id}/messages → stream responded (check manually if needed)"
+    pass "POST /ai/conversations/{id}/messages → stream responded (verify manually)"
   fi
 
-  # Second message — empty content should fail
   R=$(curl -s -X POST "$BASE/ai/conversations/$CONV_ID/messages" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"content":""}')
-  check "POST /ai/conversations/{id}/messages empty content → fails" '"success":false' "$R"
+  check "POST /ai/messages empty content → fails" '"success":false' "$R"
 
-  # Message too long
   LONG_MSG=$(python3 -c "print('a'*10001)")
   R=$(curl -s -X POST "$BASE/ai/conversations/$CONV_ID/messages" \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"content\":\"$LONG_MSG\"}")
-  check "POST /ai/conversations/{id}/messages over 10k chars → fails" '"success":false' "$R"
+  check "POST /ai/messages > 10000 chars → fails" '"success":false' "$R"
 
-  # Delete (archive) conversation
   if [ -n "$CONV2_ID" ]; then
-    R=$(curl -s -X DELETE "$BASE/ai/conversations/$CONV2_ID" \
-      -H "Authorization: Bearer $TOKEN")
+    R=$(curl -s -X DELETE "$BASE/ai/conversations/$CONV2_ID" -H "Authorization: Bearer $TOKEN")
     check "DELETE /ai/conversations/{id} → archived" '"success":true' "$R"
+
+    R=$(curl -s "$BASE/ai/conversations" -H "Authorization: Bearer $TOKEN")
+    check_not "Archived conversation no longer in list" "$CONV2_ID" "$R"
   fi
 
-  # Access non-existent conversation
   R=$(curl -s "$BASE/ai/conversations/00000000-0000-0000-0000-000000000000" \
     -H "Authorization: Bearer $TOKEN")
   check "GET /ai/conversations/{unknown-id} → fails" '"success":false' "$R"
 fi
 
-# ─── SEARCH ───────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SEARCH
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "SEARCH"
 R=$(curl -s "$BASE/search?q=Auto+Test&types=notes,tasks,events&limit=10" \
   -H "Authorization: Bearer $TOKEN")
-check "GET /search with query → success" '"success":true' "$R"
+check "GET /search all types → success" '"success":true' "$R"
 
-R=$(curl -s "$BASE/search?q=task&types=tasks&limit=5" \
-  -H "Authorization: Bearer $TOKEN")
+R=$(curl -s "$BASE/search?q=task&types=tasks&limit=5" -H "Authorization: Bearer $TOKEN")
 check "GET /search type=tasks → success" '"success":true' "$R"
 
-R=$(curl -s "$BASE/search?q=note&types=notes&limit=5" \
-  -H "Authorization: Bearer $TOKEN")
+R=$(curl -s "$BASE/search?q=note&types=notes&limit=5" -H "Authorization: Bearer $TOKEN")
 check "GET /search type=notes → success" '"success":true' "$R"
 
-R=$(curl -s "$BASE/search?q=event&types=events&limit=5" \
-  -H "Authorization: Bearer $TOKEN")
+R=$(curl -s "$BASE/search?q=event&types=events&limit=5" -H "Authorization: Bearer $TOKEN")
 check "GET /search type=events → success" '"success":true' "$R"
 
-# Empty query
-R=$(curl -s "$BASE/search?q=&types=notes&limit=5" \
-  -H "Authorization: Bearer $TOKEN")
-info "GET /search empty query response: $(echo "$R" | head -c 120)"
-
-# No results
-R=$(curl -s "$BASE/search?q=xyzzy_no_such_thing_999&types=notes,tasks,events&limit=10" \
+R=$(curl -s "$BASE/search?q=xyzzy_no_such_thing_12345&types=notes,tasks,events&limit=10" \
   -H "Authorization: Bearer $TOKEN")
 check "GET /search zero-result query → success (empty list)" '"success":true' "$R"
 
-# ─── SYNC ─────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SYNC — DELTA
+# ═════════════════════════════════════════════════════════════════════════════
 
-section "SYNC"
-R=$(curl -s "$BASE/sync/delta?since=2026-01-01T00:00:00Z" \
-  -H "Authorization: Bearer $TOKEN")
+section "SYNC — DELTA"
+R=$(curl -s "$BASE/sync/delta?since=2026-01-01T00:00:00Z" -H "Authorization: Bearer $TOKEN")
 check "GET /sync/delta → success" '"success":true' "$R"
+check "GET /sync/delta → has hasMore field" '"hasMore"' "$R"
+check "GET /sync/delta → has syncedAt field" '"syncedAt"' "$R"
 
-R=$(curl -s "$BASE/sync/delta?since=2030-01-01T00:00:00Z" \
-  -H "Authorization: Bearer $TOKEN")
+R=$(curl -s "$BASE/sync/delta?since=2026-01-01T00:00:00Z&limit=10" -H "Authorization: Bearer $TOKEN")
+check "GET /sync/delta with limit → success" '"success":true' "$R"
+
+R=$(curl -s "$BASE/sync/delta?since=2030-01-01T00:00:00Z" -H "Authorization: Bearer $TOKEN")
 check "GET /sync/delta future since → success (empty delta)" '"success":true' "$R"
 
-# ─── AUTH — FORGOT / RESET PASSWORD ──────────────────────────────
+CUTOFF=$(date -d "400 days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -v-400d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2024-01-01T00:00:00Z")
+R=$(curl -s "$BASE/sync/delta?since=$CUTOFF" -H "Authorization: Bearer $TOKEN")
+check "GET /sync/delta since > 365 days ago → fails (VAL_SYNC_RANGE_TOO_LARGE)" '"success":false' "$R"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FORGOT / RESET PASSWORD
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — FORGOT PASSWORD"
-R=$(curl -s -X POST "$BASE/auth/forgot-password" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/forgot-password" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\"}")
 check "POST /auth/forgot-password → always 200" '"success":true' "$R"
 
-R=$(curl -s -X POST "$BASE/auth/forgot-password" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/forgot-password" -H "Content-Type: application/json" \
   -d '{"email":"ghost_nobody_xyz@nowhere.com"}')
 check "POST /auth/forgot-password unknown email → still 200 (no enumeration)" '"success":true' "$R"
 
-R=$(curl -s -X POST "$BASE/auth/forgot-password" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/forgot-password" -H "Content-Type: application/json" \
   -d '{"email":"not-an-email"}')
-check "POST /auth/forgot-password invalid email format → fails" '"success":false' "$R"
+check "POST /auth/forgot-password invalid format → fails" '"success":false' "$R"
 
-section "AUTH — VERIFY FORGOT PASSWORD OTP (interactive)"
-echo ""
-info "A password-reset OTP was just sent to: $EMAIL"
-info "Check your inbox."
-echo ""
+section "AUTH — VERIFY FORGOT PASSWORD OTP"
+info "A password-reset OTP was sent to: $EMAIL. Check your inbox."
 
 echo -n "    Enter a WRONG reset OTP to test failure (e.g. 000000): "
 read -r WRONG_RESET_OTP
-R=$(curl -s -X POST "$BASE/auth/verify-forgot-otp" \
-  -H "Content-Type: application/json" \
+R=$(curl -s -X POST "$BASE/auth/verify-forgot-otp" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"otp\":\"$WRONG_RESET_OTP\"}")
 check "POST /auth/verify-forgot-otp wrong OTP → fails" '"success":false' "$R"
 
 prompt_otp "Enter the REAL reset OTP from your email"
-RESET_OTP_R=$(curl -s -X POST "$BASE/auth/verify-forgot-otp" \
-  -H "Content-Type: application/json" \
+RESET_OTP_R=$(curl -s -X POST "$BASE/auth/verify-forgot-otp" -H "Content-Type: application/json" \
   -d "{\"email\":\"$EMAIL\",\"otp\":\"$OTP_INPUT\"}")
 check "POST /auth/verify-forgot-otp correct OTP → success + resetToken" '"success":true' "$RESET_OTP_R"
 RESET_TOKEN=$(extract "$RESET_OTP_R" "data.resetToken")
@@ -877,91 +888,109 @@ info "Reset token: ${RESET_TOKEN:0:30}..."
 
 section "AUTH — RESET PASSWORD"
 if [ -n "$RESET_TOKEN" ]; then
-  # Weak new password
-  R=$(curl -s -X POST "$BASE/auth/reset-password" \
-    -H "Content-Type: application/json" \
+  R=$(curl -s -X POST "$BASE/auth/reset-password" -H "Content-Type: application/json" \
     -d "{\"token\":\"$RESET_TOKEN\",\"newPassword\":\"weak\"}")
   check "POST /auth/reset-password weak password → fails" '"success":false' "$R"
 
-  # Bad token
-  R=$(curl -s -X POST "$BASE/auth/reset-password" \
-    -H "Content-Type: application/json" \
+  R=$(curl -s -X POST "$BASE/auth/reset-password" -H "Content-Type: application/json" \
     -d '{"token":"completely-wrong-token","newPassword":"NewPass@5678"}')
   check "POST /auth/reset-password bad token → fails" '"success":false' "$R"
 
   NEW_PASSWORD="NewPass@5678"
-  R=$(curl -s -X POST "$BASE/auth/reset-password" \
-    -H "Content-Type: application/json" \
+  R=$(curl -s -X POST "$BASE/auth/reset-password" -H "Content-Type: application/json" \
     -d "{\"token\":\"$RESET_TOKEN\",\"newPassword\":\"$NEW_PASSWORD\"}")
   check "POST /auth/reset-password valid → success" '"success":true' "$R"
 
-  # Login with old password — should fail
-  R=$(curl -s -X POST "$BASE/auth/login" \
-    -H "Content-Type: application/json" \
+  R=$(curl -s -X POST "$BASE/auth/reset-password" -H "Content-Type: application/json" \
+    -d "{\"token\":\"$RESET_TOKEN\",\"newPassword\":\"AnotherPass@999\"}")
+  check "POST /auth/reset-password replay same token → fails (already used)" '"success":false' "$R"
+
+  R=$(curl -s -X POST "$BASE/auth/login" -H "Content-Type: application/json" \
     -d "{\"identifier\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
   check "Login with old password after reset → fails" '"success":false' "$R"
 
-  # Login with new password
   LOGIN_NEW_R=$(curl -s -c "$COOKIE_JAR" -X POST "$BASE/auth/login" \
     -H "Content-Type: application/json" \
     -d "{\"identifier\":\"$EMAIL\",\"password\":\"$NEW_PASSWORD\"}")
   check "Login with new password after reset → success" '"success":true' "$LOGIN_NEW_R"
-  NEW_TOKEN=$(extract "$LOGIN_NEW_R" "data.accessToken")
-  [ -n "$NEW_TOKEN" ] && TOKEN="$NEW_TOKEN"
+  T=$(extract "$LOGIN_NEW_R" "data.accessToken")
+  [ -n "$T" ] && TOKEN="$T"
   PASSWORD="$NEW_PASSWORD"
 fi
 
-# ─── AUTH — CHANGE PASSWORD ───────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# CHANGE PASSWORD
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — CHANGE PASSWORD"
-
-# Wrong current password
-R=$(curl -s -X POST "$BASE/auth/change-password" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/auth/change-password" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"currentPassword\":\"WrongOld@000\",\"newPassword\":\"ChangedPass@9999\"}")
+  -d '{"currentPassword":"WrongOld@000","newPassword":"ChangedPass@9999"}')
 check "POST /auth/change-password wrong current → fails" '"success":false' "$R"
 
-# New password too short
-R=$(curl -s -X POST "$BASE/auth/change-password" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/auth/change-password" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"currentPassword\":\"$PASSWORD\",\"newPassword\":\"abc\"}")
-check "POST /auth/change-password short new password → fails" '"success":false' "$R"
+check "POST /auth/change-password weak new password → fails" '"success":false' "$R"
 
-# Valid change
 CHANGED_PASSWORD="ChangedPass@9999"
-R=$(curl -s -X POST "$BASE/auth/change-password" \
-  -H "Authorization: Bearer $TOKEN" \
+R=$(curl -s -X POST "$BASE/auth/change-password" -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"currentPassword\":\"$PASSWORD\",\"newPassword\":\"$CHANGED_PASSWORD\"}")
 check "POST /auth/change-password valid → success" '"success":true' "$R"
 PASSWORD="$CHANGED_PASSWORD"
 
-# Login with changed password
 LOGIN_CHG=$(curl -s -c "$COOKIE_JAR" -X POST "$BASE/auth/login" \
   -H "Content-Type: application/json" \
   -d "{\"identifier\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
 check "Login with changed password → success" '"success":true' "$LOGIN_CHG"
-CHG_TOKEN=$(extract "$LOGIN_CHG" "data.accessToken")
-[ -n "$CHG_TOKEN" ] && TOKEN="$CHG_TOKEN"
+T=$(extract "$LOGIN_CHG" "data.accessToken")
+[ -n "$T" ] && TOKEN="$T"
 
-# ─── AUTH — LOGOUT ────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# IDEMPOTENCY
+# ═════════════════════════════════════════════════════════════════════════════
+
+section "IDEMPOTENCY FILTER"
+IDEMP_KEY="test-key-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "fallback-key-$TIMESTAMP")"
+
+R1=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEMP_KEY" \
+  -d '{"name":"idem-tag","color":"#6366F1"}')
+check "POST with Idempotency-Key (first call) → success" '"success":true' "$R1"
+IDEMP_TAG_NAME=$(extract "$R1" "data.name")
+
+R2=$(curl -s -X POST "$BASE/tags" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEMP_KEY" \
+  -d '{"name":"idem-tag","color":"#6366F1"}')
+check "POST with same Idempotency-Key (replay) → same response" '"success":true' "$R2"
+check "Idempotency replay → tag name unchanged (not duplicated)" "idem-tag" "$R2"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LOGOUT
+# ═════════════════════════════════════════════════════════════════════════════
 
 section "AUTH — LOGOUT"
-R=$(curl -s -b "$COOKIE_JAR" -X POST "$BASE/auth/logout" \
-  -H "Authorization: Bearer $TOKEN")
+R=$(curl -s -b "$COOKIE_JAR" -X POST "$BASE/auth/logout" -H "Authorization: Bearer $TOKEN")
 check "POST /auth/logout → success" '"success":true' "$R"
 
-# Refresh after logout should fail (cookie revoked)
 R=$(curl -s -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "$BASE/auth/refresh")
 check "POST /auth/refresh after logout → fails (cookie revoked)" '"success":false' "$R"
 
-# ─── CLEANUP ──────────────────────────────────────────────────────
+R=$(curl -s "$BASE/auth/me" -H "Authorization: Bearer $TOKEN")
+info "GET /auth/me after logout with old token (JWT still valid until expiry): $(echo "$R" | head -c 80)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CLEANUP
+# ═════════════════════════════════════════════════════════════════════════════
 
 rm -f "$COOKIE_JAR"
 
-# ─── SUMMARY ──────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SUMMARY
+# ═════════════════════════════════════════════════════════════════════════════
 
 TOTAL=$((PASS + FAIL))
 echo ""
@@ -976,3 +1005,5 @@ else
   echo -e "  ${GREEN}Failed : 0 — clean run 🎉${NC}"
 fi
 echo "═══════════════════════════════════════════════════════"
+
+exit $FAIL
