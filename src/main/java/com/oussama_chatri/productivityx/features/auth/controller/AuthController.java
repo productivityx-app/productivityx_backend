@@ -1,6 +1,7 @@
 package com.oussama_chatri.productivityx.features.auth.controller;
 
 import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.features.auth.dto.request.*;
 import com.oussama_chatri.productivityx.features.auth.dto.response.AuthResponse;
 import com.oussama_chatri.productivityx.features.auth.dto.response.ForgotPasswordOtpVerifiedResponse;
@@ -14,9 +15,11 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.io.IOException;
 import java.util.Arrays;
 
 @RestController
@@ -26,6 +29,9 @@ import java.util.Arrays;
 public class AuthController {
 
     private final AuthService authService;
+
+    @Value("${app.frontend-url:http://localhost:5173}")
+    private String frontendUrl;
 
     @PostMapping("/register")
     @Operation(summary = "Register a new account — sends verification email with OTP + magic link")
@@ -40,6 +46,25 @@ public class AuthController {
         return ResponseEntity.status(201)
                 .body(ApiResponse.message(
                         "Check your email to verify your account."));
+    }
+
+    @GetMapping("/verify-email")
+    @Operation(summary = "Verify email via magic link (GET — for browser clicks from email). Redirects to frontend.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "302", description = "Redirects to frontend with ?status=verified or ?error=ERROR_CODE"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Token missing"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Token invalid or expired")
+    })
+    public void verifyEmailGet(
+            @RequestParam String token,
+            HttpServletResponse response) throws IOException {
+
+        try {
+            authService.verifyEmail(token, response);
+            response.sendRedirect(frontendUrl + "/verify-email?status=verified");
+        } catch (AppException e) {
+            response.sendRedirect(frontendUrl + "/verify-email?error=" + e.getErrorCode().getCode());
+        }
     }
 
     @PostMapping("/verify-email")
