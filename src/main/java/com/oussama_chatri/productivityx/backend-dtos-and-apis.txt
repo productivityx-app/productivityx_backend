@@ -1,0 +1,2948 @@
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\core\dto\ApiResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.core.dto;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+
+@Getter
+@Builder
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class ApiResponse<T> {
+
+    private final boolean success;
+    private final T data;
+    private final String message;
+    private final String errorCode;
+
+    @Builder.Default
+    private final Instant timestamp = Instant.now();
+
+    // Success responses
+    public static <T> ApiResponse<T> ok(T data) {
+        return ApiResponse.<T>builder()
+                .success(true)
+                .data(data)
+                .build();
+    }
+
+    public static <T> ApiResponse<T> ok(T data, String message) {
+        return ApiResponse.<T>builder()
+                .success(true)
+                .data(data)
+                .message(message)
+                .build();
+    }
+
+    public static ApiResponse<Void> message(String message) {
+        return ApiResponse.<Void>builder()
+                .success(true)
+                .message(message)
+                .build();
+    }
+
+    public static <T> ApiResponse<T> error(String errorCode, String message) {
+        return ApiResponse.<T>builder()
+                .success(false)
+                .errorCode(errorCode)
+                .message(message)
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\core\dto\PagedResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.core.dto;
+
+import lombok.Builder;
+import lombok.Getter;
+
+import java.util.List;
+
+@Getter
+@Builder
+public class PagedResponse<T> {
+
+    private final List<T> content;
+    private final int page;
+    private final int size;
+    private final long totalElements;
+    private final int totalPages;
+    private final boolean last;
+    private final boolean first;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\admin\controller\AdminCleanupController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.admin.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.jobs.CleanupScheduler;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * Admin-only endpoints for manual operational triggers.
+ *
+ * <p>All routes require the ADMIN authority. In the current auth model this
+ * is granted via a role claim in the JWT; non-admin users receive 403.
+ */
+@RestController
+@RequestMapping("/api/v1/admin")
+@RequiredArgsConstructor
+@PreAuthorize("hasAuthority('ADMIN')")
+@SecurityRequirement(name = "bearerAuth")
+@Tag(name = "Admin", description = "Operational endpoints — admin role required")
+public class AdminCleanupController {
+
+    private final CleanupScheduler cleanupScheduler;
+
+    /**
+     * Manually triggers the tombstone cleanup job that normally runs at 03:00 UTC.
+     * Useful for testing the purge logic or reclaiming space ahead of schedule.
+     */
+    @PostMapping("/cleanup")
+    @Operation(summary = "Trigger tombstone cleanup manually",
+               description = "Runs the same purge logic as the scheduled job: " +
+                             "permanently deletes notes, tasks, and events that have " +
+                             "been in the trash for more than 30 days.")
+    public ResponseEntity<ApiResponse<Void>> triggerCleanup() {
+        cleanupScheduler.purgeDeletedRecords();
+        return ResponseEntity.ok(ApiResponse.message("Tombstone cleanup triggered."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\ai\controller\AiController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.ai.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.dto.PagedResponse;
+import com.oussama_chatri.productivityx.features.ai.dto.request.ChatRequest;
+import com.oussama_chatri.productivityx.features.ai.dto.response.ConversationResponse;
+import com.oussama_chatri.productivityx.features.ai.service.AiService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/ai")
+@RequiredArgsConstructor
+@Tag(name = "AI", description = "AI Assistant — conversations, streaming chat, workspace context")
+public class AiController {
+
+    private final AiService aiService;
+
+    @GetMapping("/conversations")
+    @Operation(summary = "List all conversations for the current user — newest first, archived excluded")
+    public ResponseEntity<ApiResponse<PagedResponse<ConversationResponse>>> listConversations(
+            @RequestParam(defaultValue = "0")  int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ResponseEntity.ok(ApiResponse.ok(aiService.listConversations(page, size)));
+    }
+
+    @PostMapping("/conversations")
+    @Operation(summary = "Create a new empty conversation")
+    public ResponseEntity<ApiResponse<ConversationResponse>> createConversation() {
+        return ResponseEntity.status(201)
+                .body(ApiResponse.ok(aiService.createConversation(), "Conversation created."));
+    }
+
+    @GetMapping("/conversations/{id}")
+    @Operation(summary = "Get a conversation with its full message history")
+    public ResponseEntity<ApiResponse<ConversationResponse>> getConversation(
+            @PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(aiService.getConversation(id)));
+    }
+
+    @DeleteMapping("/conversations/{id}")
+    @Operation(summary = "Archive a conversation — does not permanently delete it")
+    public ResponseEntity<ApiResponse<Void>> deleteConversation(@PathVariable UUID id) {
+        aiService.deleteConversation(id);
+        return ResponseEntity.ok(ApiResponse.message("Conversation archived."));
+    }
+
+    /**
+     * SSE streaming endpoint.
+     * The client connects with Accept: text/event-stream.
+     * Each SSE event carries a token. The stream ends with a "done" event containing "[DONE]".
+     * The full response is persisted server-side after streaming completes.
+     */
+    @PostMapping(
+            value = "/conversations/{id}/messages",
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE
+    )
+    @Operation(
+            summary = "Send a message and receive the AI response as an SSE stream",
+            description = "Tokens are emitted one-by-one. The stream ends with event:done data:[DONE]. " +
+                          "The user message and full assistant response are persisted after streaming."
+    )
+    public SseEmitter sendMessage(
+            @PathVariable UUID id,
+            @Valid @RequestBody ChatRequest request) {
+        return aiService.sendMessage(id, request);
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\ai\dto\request\AiContext.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.ai.dto.request;
+
+import lombok.Builder;
+import lombok.Getter;
+
+/**
+ * Snapshot of the user's live workspace state injected into every Gemini request.
+ * Built by AiContextBuilder from live DB queries — always fresh, never cached.
+ *
+ * NOTE: This class belongs in the 'dto' package, NOT 'dto.request'.
+ * Update the import in AiServiceImpl accordingly:
+ *   import com.oussama_chatri.productivityx.features.ai.dto.AiContext;
+ */
+@Getter
+@Builder
+public class AiContext {
+
+    private final int    tasksDueToday;
+    private final int    tasksOverdue;
+    private final int    totalActiveTasks;
+    private final int    upcomingEventsThisWeek;
+    private final String lastEditedNoteTitle;
+    private final String currentPomodoroTask;
+    private final int    todayFocusMinutes;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\ai\dto\request\ChatRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.ai.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class ChatRequest {
+
+    @NotBlank(message = "Message content is required.")
+    @Size(max = 10000, message = "Message must not exceed 10,000 characters.")
+    private String content;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\ai\dto\response\AiContext.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.ai.dto.response;
+
+import lombok.Builder;
+import lombok.Getter;
+
+@Getter
+@Builder
+public class AiContext {
+
+    private final int tasksDueToday;
+    private final int tasksOverdue;
+    private final int totalActiveTasks;
+    private final int upcomingEventsThisWeek;
+    private final String lastEditedNoteTitle;
+    private final String currentPomodoroTask;
+    private final int todayFocusMinutes;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\ai\dto\response\ConversationResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.ai.dto.response;
+
+import com.oussama_chatri.productivityx.features.ai.entity.Conversation;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Getter
+@Builder
+public class ConversationResponse {
+
+    private final UUID id;
+    private final UUID userId;
+    private final String title;
+    private final boolean archived;
+    private final List<MessageResponse> messages;
+    private final Instant createdAt;
+    private final Instant updatedAt;
+
+    public static ConversationResponse from(Conversation conversation) {
+        return ConversationResponse.builder()
+                .id(conversation.getId())
+                .userId(conversation.getUserId())
+                .title(conversation.getTitle())
+                .archived(conversation.isArchived())
+                .messages(conversation.getMessages().stream()
+                        .map(MessageResponse::from)
+                        .collect(Collectors.toList()))
+                .createdAt(conversation.getCreatedAt())
+                .updatedAt(conversation.getUpdatedAt())
+                .build();
+    }
+
+    // Lightweight version — no messages (for list endpoints)
+    public static ConversationResponse summary(Conversation conversation) {
+        return ConversationResponse.builder()
+                .id(conversation.getId())
+                .userId(conversation.getUserId())
+                .title(conversation.getTitle())
+                .archived(conversation.isArchived())
+                .messages(List.of())
+                .createdAt(conversation.getCreatedAt())
+                .updatedAt(conversation.getUpdatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\ai\dto\response\MessageResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.ai.dto.response;
+
+import com.oussama_chatri.productivityx.core.enums.MessageRole;
+import com.oussama_chatri.productivityx.features.ai.entity.Message;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+public class MessageResponse {
+
+    private final UUID id;
+    private final UUID conversationId;
+    private final MessageRole role;
+    private final String content;
+    private final String actionBlock;
+    private final Integer tokenCount;
+    private final Instant createdAt;
+
+    public static MessageResponse from(Message message) {
+        return MessageResponse.builder()
+                .id(message.getId())
+                .conversationId(message.getConversation().getId())
+                .role(message.getRole())
+                .content(message.getContent())
+                .actionBlock(message.getActionBlock())
+                .tokenCount(message.getTokenCount())
+                .createdAt(message.getCreatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\controller\AuthController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.auth.dto.request.*;
+import com.oussama_chatri.productivityx.features.auth.dto.response.AuthResponse;
+import com.oussama_chatri.productivityx.features.auth.dto.response.ForgotPasswordOtpVerifiedResponse;
+import com.oussama_chatri.productivityx.features.auth.dto.response.UserResponse;
+import com.oussama_chatri.productivityx.features.auth.service.AuthService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Arrays;
+
+@RestController
+@RequestMapping("/api/v1/auth")
+@RequiredArgsConstructor
+@Tag(name = "Auth")
+public class AuthController {
+
+    private final AuthService authService;
+
+    @PostMapping("/register")
+    @Operation(summary = "Register a new account — sends verification email with OTP + magic link")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "201", description = "Registration successful"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Validation error — missing or invalid fields"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409", description = "Email or username already exists")
+    })
+    public ResponseEntity<ApiResponse<Void>> register(
+            @Valid @RequestBody RegisterRequest request) {
+        authService.register(request);
+        return ResponseEntity.status(201)
+                .body(ApiResponse.message(
+                        "Check your email to verify your account."));
+    }
+
+    @PostMapping("/verify-email")
+    @Operation(summary = "Verify email via magic link — supports POST body and ?token= query param")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Email verified, tokens returned"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Token missing"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Token invalid or expired")
+    })
+    public ResponseEntity<ApiResponse<AuthResponse>> verifyEmail(
+            @Valid @RequestBody(required = false) VerifyEmailRequest body,
+            @RequestParam(required = false) String token,
+            HttpServletResponse response) {
+
+        String resolved = resolveToken(token, body != null ? body.getToken() : null);
+        if (resolved == null) {
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.error(
+                            "VAL_005", "Token is required."));
+        }
+
+        AuthResponse authResponse = authService.verifyEmail(resolved, response);
+        return ResponseEntity.ok(ApiResponse.ok(
+                authResponse, "Email verified successfully."));
+    }
+
+    @PostMapping("/verify-otp")
+    @Operation(summary = "Verify email via 6-digit OTP — brute-force protected per user")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "OTP verified, tokens returned"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Invalid email format or OTP format"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "OTP incorrect or expired")
+    })
+    public ResponseEntity<ApiResponse<AuthResponse>> verifyOtp(
+            @Valid @RequestBody VerifyOtpRequest request,
+            HttpServletResponse response) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                authService.verifyOtp(request, response), "Email verified successfully."));
+    }
+
+    @PostMapping("/resend-verification")
+    @Operation(summary = "Resend verification email — rate-limited to 3 per 10 minutes per user")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Verification email sent if account exists"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Invalid email format"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "429", description = "Rate limit exceeded")
+    })
+    public ResponseEntity<ApiResponse<Void>> resendVerification(
+            @Valid @RequestBody ResendVerificationRequest request) {
+        authService.resendVerification(request);
+        return ResponseEntity.ok(ApiResponse.message(
+                "If that email exists, a new verification link has been sent."));
+    }
+
+    @PostMapping("/login")
+    @Operation(summary = "Login — returns accessToken in body, sets refreshToken as HttpOnly cookie. " +
+            "Pass deviceId, deviceName, platform for multi-device tracking.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Login successful"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Invalid credentials or unverified email"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "423", description = "Account locked after failed attempts")
+    })
+    public ResponseEntity<ApiResponse<AuthResponse>> login(
+            @Valid @RequestBody LoginRequest request,
+            HttpServletRequest httpRequest,
+            HttpServletResponse response) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                authService.login(request, httpRequest, response), "Login successful."));
+    }
+
+    @PostMapping("/refresh")
+    @Operation(summary = "Rotate refresh token — reads from HttpOnly cookie, returns new accessToken. " +
+            "Pass X-Device-Id header for device-bound refresh verification.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Token rotated successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Refresh token missing, invalid, or revoked")
+    })
+    public ResponseEntity<ApiResponse<AuthResponse>> refresh(
+            HttpServletRequest request,
+            @RequestHeader(value = "X-Device-Id", required = false) String deviceId,
+            HttpServletResponse response) {
+        String rawToken = extractRefreshCookie(request);
+        return ResponseEntity.ok(ApiResponse.ok(
+                authService.refresh(rawToken, deviceId, response), "Token refreshed."));
+    }
+
+    @PostMapping("/logout")
+    @Operation(summary = "Logout — revokes current refresh token and clears the cookie")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Logged out successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Not authenticated")
+    })
+    public ResponseEntity<ApiResponse<Void>> logout(
+            HttpServletRequest request,
+            HttpServletResponse response) {
+        authService.logout(extractRefreshCookie(request), response);
+        return ResponseEntity.ok(ApiResponse.message("Logged out."));
+    }
+
+    @PostMapping("/forgot-password")
+    @Operation(summary = "Request a password reset — sends email with OTP + reset link. Always returns 200.")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Reset email sent if account exists"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Invalid email format")
+    })
+    public ResponseEntity<ApiResponse<Void>> forgotPassword(
+            @Valid @RequestBody ForgotPasswordRequest request) {
+        authService.forgotPassword(request);
+        return ResponseEntity.ok(ApiResponse.message(
+                "If that email exists, a reset code has been sent."));
+    }
+
+    @PostMapping("/verify-forgot-otp")
+    @Operation(summary = "Verify the password-reset OTP — returns a short-lived resetToken for /reset-password")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "OTP verified, resetToken returned"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Invalid email format or OTP format"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "OTP incorrect or expired")
+    })
+    public ResponseEntity<ApiResponse<ForgotPasswordOtpVerifiedResponse>> verifyForgotPasswordOtp(
+            @Valid @RequestBody VerifyForgotPasswordOtpRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                authService.verifyForgotPasswordOtp(request),
+                "OTP verified. Use the resetToken to set your new password."));
+    }
+
+    @PostMapping("/reset-password")
+    @Operation(summary = "Reset password using the token from the reset email or verify-forgot-otp")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Password reset successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Weak password or invalid token format"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Token invalid or expired")
+    })
+    public ResponseEntity<ApiResponse<Void>> resetPassword(
+            @Valid @RequestBody ResetPasswordRequest request) {
+        authService.resetPassword(request);
+        return ResponseEntity.ok(ApiResponse.message(
+                "Password reset. Please log in with your new password."));
+    }
+
+    @PostMapping("/change-password")
+    @Operation(summary = "Change password for the authenticated user — requires current password")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Password changed successfully"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Weak new password"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Current password incorrect or not authenticated")
+    })
+    public ResponseEntity<ApiResponse<Void>> changePassword(
+            @Valid @RequestBody ChangePasswordRequest request) {
+        authService.changePassword(request);
+        return ResponseEntity.ok(ApiResponse.message(
+                "Password changed."));
+    }
+
+    @GetMapping("/me")
+    @Operation(summary = "Get the current user's full profile, preferences, and account info")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "User info returned"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Not authenticated")
+    })
+    public ResponseEntity<ApiResponse<UserResponse>> me() {
+        return ResponseEntity.ok(ApiResponse.ok(authService.me()));
+    }
+
+    @DeleteMapping("/account")
+    @Operation(summary = "Permanently delete the authenticated account — requires password confirmation")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "Account deleted"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "Password missing or invalid"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401", description = "Wrong password or not authenticated")
+    })
+    public ResponseEntity<ApiResponse<Void>> deleteAccount(
+            @Valid @RequestBody DeleteAccountRequest request) {
+        authService.deleteAccount(request);
+        return ResponseEntity.ok(ApiResponse.message(
+                "Account deleted."));
+    }
+
+    private String extractRefreshCookie(HttpServletRequest request) {
+        if (request.getCookies() == null) return null;
+        return Arrays.stream(request.getCookies())
+                .filter(c -> "refreshToken".equals(c.getName()))
+                .map(Cookie::getValue)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private String resolveToken(String queryParam, String bodyToken) {
+        if (queryParam != null && !queryParam.isBlank()) return queryParam;
+        if (bodyToken != null && !bodyToken.isBlank()) return bodyToken;
+        return null;
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\controller\DeviceController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.auth.dto.request.UpdatePushTokenRequest;
+import com.oussama_chatri.productivityx.features.auth.dto.response.DeviceResponse;
+import com.oussama_chatri.productivityx.features.auth.service.DeviceService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/v1/devices")
+@RequiredArgsConstructor
+@Tag(name = "Devices", description = "Multi-device session management — list and revoke active devices")
+public class DeviceController {
+
+    private final DeviceService deviceService;
+
+    @GetMapping
+    @Operation(summary = "List all active devices for the current user")
+    public ResponseEntity<ApiResponse<List<DeviceResponse>>> listDevices() {
+        return ResponseEntity.ok(ApiResponse.ok(deviceService.listDevices()));
+    }
+
+    @DeleteMapping("/{deviceId}")
+    @Operation(summary = "Revoke a device — invalidates all refresh tokens for that device")
+    public ResponseEntity<ApiResponse<Void>> revokeDevice(@PathVariable String deviceId) {
+        deviceService.revokeDevice(deviceId);
+        return ResponseEntity.ok(ApiResponse.message("Device revoked."));
+    }
+
+    @PatchMapping("/{deviceId}/push-token")
+    @Operation(summary = "Update FCM push token for a device")
+    public ResponseEntity<ApiResponse<Void>> updatePushToken(
+            @PathVariable String deviceId,
+            @Valid @RequestBody UpdatePushTokenRequest request) {
+        deviceService.updatePushToken(deviceId, request);
+        return ResponseEntity.ok(ApiResponse.message("Push token updated."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\ChangePasswordRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class ChangePasswordRequest {
+
+    @NotBlank(message = "Current password is required.")
+    private String currentPassword;
+
+    @NotBlank(message = "New password is required.")
+    @Size(min = 8, message = "Password must be at least 8 characters.")
+    private String newPassword;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\DeleteAccountRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class DeleteAccountRequest {
+
+    @NotBlank(message = "Password is required to confirm account deletion.")
+    private String password;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\ForgotPasswordRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class ForgotPasswordRequest {
+
+    @Schema(example = "user@example.com", format = "email")
+    @Email(message = "Invalid email address format.")
+    @NotBlank(message = "Email is required.")
+    private String email;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\LoginRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class LoginRequest {
+
+    @NotBlank(message = "Identifier is required.")
+    private String identifier;
+
+    @NotBlank(message = "Password is required.")
+    private String password;
+
+    // Device info — sent by mobile/desktop clients to enable multi-device session tracking
+    @Schema(description = "Stable device identifier (e.g. Firebase Installation ID)", example = "a1b2c3d4e5f6")
+    private String deviceId;
+
+    @Schema(description = "Human-readable device name", example = "iPhone 15 Pro")
+    private String deviceName;
+
+    @Schema(description = "Platform: ANDROID, IOS, DESKTOP, WEB", example = "ANDROID")
+    private String platform;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\RegisterRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import com.oussama_chatri.productivityx.core.enums.Gender;
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+import java.time.LocalDate;
+
+@Data
+    public class RegisterRequest {
+
+    @Schema(example = "user@example.com", format = "email")
+    @Email(message = "Invalid email address format.")
+    @NotBlank(message = "Email is required.")
+    private String email;
+
+    @NotBlank(message = "Username is required.")
+    @Size(min = 3, max = 30, message = "Username must be between 3 and 30 characters.")
+    private String username;
+
+    @NotBlank(message = "Password is required.")
+    @Size(min = 8, message = "Password must be at least 8 characters.")
+    private String password;
+
+    @NotBlank(message = "First name is required.")
+    @Size(max = 50, message = "First name must not exceed 50 characters.")
+    private String firstName;
+
+    @NotBlank(message = "Last name is required.")
+    @Size(max = 50, message = "Last name must not exceed 50 characters.")
+    private String lastName;
+
+    private String phone;
+    private Gender gender;
+
+    @NotNull(message = "Birth date is required.")
+    private LocalDate birthDate;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\ResendVerificationRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class ResendVerificationRequest {
+
+    @Schema(example = "user@example.com", format = "email")
+    @Email(message = "Invalid email address format.")
+    @NotBlank(message = "Email is required.")
+    private String email;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\ResetPasswordRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class ResetPasswordRequest {
+
+    @NotBlank(message = "Token is required.")
+    private String token;
+
+    @NotBlank(message = "New password is required.")
+    @Size(min = 8, message = "Password must be at least 8 characters.")
+    private String newPassword;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\UpdatePushTokenRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class UpdatePushTokenRequest {
+
+    @NotBlank(message = "Push token is required.")
+    @Schema(description = "FCM registration token for push notifications", example = "fK7yZ...")
+    private String pushToken;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\VerifyEmailRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class VerifyEmailRequest {
+
+    @NotBlank(message = "Token is required.")
+    private String token;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\VerifyForgotPasswordOtpRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class VerifyForgotPasswordOtpRequest {
+
+    @Schema(example = "user@example.com", format = "email")
+    @Email(message = "Invalid email address format.")
+    @NotBlank(message = "Email is required.")
+    private String email;
+
+    @NotBlank(message = "OTP is required.")
+    @Size(min = 6, max = 6, message = "OTP must be exactly 6 digits.")
+    private String otp;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\request\VerifyOtpRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.request;
+
+import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+import lombok.Data;
+
+@Data
+public class VerifyOtpRequest {
+
+    @Schema(example = "user@example.com", format = "email")
+    @Email(message = "Invalid email address format.")
+    @NotBlank(message = "Email is required.")
+    private String email;
+
+    @NotBlank(message = "OTP is required.")
+    @Pattern(regexp = "^\\d{6}$", message = "OTP must be exactly 6 digits.")
+    private String otp;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\response\AuthResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.response;
+
+import lombok.Builder;
+import lombok.Getter;
+
+@Getter
+@Builder
+public class AuthResponse {
+
+    private final String accessToken;
+    private final String tokenType;
+    private final long expiresIn;
+
+    public static AuthResponse of(String accessToken, long expiresInMs) {
+        return AuthResponse.builder()
+                .accessToken(accessToken)
+                .tokenType("Bearer")
+                .expiresIn(expiresInMs / 1000)
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\response\DeviceResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.response;
+
+import com.oussama_chatri.productivityx.core.enums.Platform;
+import com.oussama_chatri.productivityx.features.auth.entity.UserDevice;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+public class DeviceResponse {
+
+    private final UUID id;
+    private final String deviceId;
+    private final String deviceName;
+    private final Platform platform;
+    private final Instant lastSeenAt;
+    private final Instant createdAt;
+
+    public static DeviceResponse from(UserDevice device) {
+        return DeviceResponse.builder()
+                .id(device.getId())
+                .deviceId(device.getDeviceId())
+                .deviceName(device.getDeviceName())
+                .platform(device.getPlatform())
+                .lastSeenAt(device.getLastSeenAt())
+                .createdAt(device.getCreatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\response\ForgotPasswordOtpVerifiedResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.response;
+
+import lombok.Builder;
+import lombok.Getter;
+
+@Getter
+@Builder
+public class ForgotPasswordOtpVerifiedResponse {
+
+    private final String resetToken;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\auth\dto\response\UserResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.auth.dto.response;
+
+import com.oussama_chatri.productivityx.core.enums.Gender;
+import com.oussama_chatri.productivityx.core.enums.Language;
+import com.oussama_chatri.productivityx.core.enums.Theme;
+import com.oussama_chatri.productivityx.core.user.User;
+import com.oussama_chatri.productivityx.features.preferences.entity.UserPreferences;
+import com.oussama_chatri.productivityx.features.profile.entity.Profile;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.UUID;
+
+@Getter
+@Builder
+public class UserResponse {
+
+    private final UUID id;
+    private final String email;
+    private final String username;
+    private final String phone;
+    private final boolean emailVerified;
+    private final Gender gender;
+    private final LocalDate birthDate;
+    private final Instant lastLoginAt;
+    private final Instant createdAt;
+
+    // Profile
+    private final String firstName;
+    private final String lastName;
+    private final String avatarUrl;
+    private final String bio;
+    private final String timezone;
+    private final Language language;
+    private final Theme theme;
+
+    // Preferences snapshot
+    private final int pomodoroFocusMinutes;
+    private final int pomodoroShortBreakMinutes;
+    private final int pomodoroLongBreakMinutes;
+    private final int pomodoroCyclesBeforeLongBreak;
+    private final boolean pomodoroAutoStartBreaks;
+    private final boolean pomodoroAutoStartFocus;
+    private final boolean pomodoroSoundEnabled;
+    private final boolean notifyTaskReminders;
+    private final boolean notifyEventReminders;
+    private final boolean notifyPomodoroEnd;
+    private final boolean notifyDailySummary;
+    private final String defaultTaskView;
+    private final String defaultTaskSort;
+    private final boolean showCompletedTasks;
+    private final String defaultCalendarView;
+    private final String weekStartsOn;
+    private final boolean aiContextEnabled;
+    private final String aiModel;
+    private final boolean compactMode;
+
+    public static UserResponse from(User user, Profile profile, UserPreferences prefs) {
+        return UserResponse.builder()
+                .id(user.getId())
+                .email(user.getEmail())
+                .username(user.getUsername())
+                .phone(user.getPhone())
+                .emailVerified(user.isEmailVerified())
+                .gender(user.getGender())
+                .birthDate(user.getBirthDate())
+                .lastLoginAt(user.getLastLoginAt())
+                .createdAt(user.getCreatedAt())
+                .firstName(profile.getFirstName())
+                .lastName(profile.getLastName())
+                .avatarUrl(profile.getAvatarUrl())
+                .bio(profile.getBio())
+                .timezone(profile.getTimezone())
+                .language(profile.getLanguage())
+                .theme(profile.getTheme())
+                .pomodoroFocusMinutes(prefs.getPomodoroFocusMinutes())
+                .pomodoroShortBreakMinutes(prefs.getPomodoroShortBreakMinutes())
+                .pomodoroLongBreakMinutes(prefs.getPomodoroLongBreakMinutes())
+                .pomodoroCyclesBeforeLongBreak(prefs.getPomodoroCyclesBeforeLongBreak())
+                .pomodoroAutoStartBreaks(prefs.isPomodoroAutoStartBreaks())
+                .pomodoroAutoStartFocus(prefs.isPomodoroAutoStartFocus())
+                .pomodoroSoundEnabled(prefs.isPomodoroSoundEnabled())
+                .notifyTaskReminders(prefs.isNotifyTaskReminders())
+                .notifyEventReminders(prefs.isNotifyEventReminders())
+                .notifyPomodoroEnd(prefs.isNotifyPomodoroEnd())
+                .notifyDailySummary(prefs.isNotifyDailySummary())
+                .defaultTaskView(prefs.getDefaultTaskView())
+                .defaultTaskSort(prefs.getDefaultTaskSort())
+                .showCompletedTasks(prefs.isShowCompletedTasks())
+                .defaultCalendarView(prefs.getDefaultCalendarView())
+                .weekStartsOn(prefs.getWeekStartsOn())
+                .aiContextEnabled(prefs.isAiContextEnabled())
+                .aiModel(prefs.getAiModel())
+                .compactMode(prefs.isCompactMode())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\events\controller\EventController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.events.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.dto.PagedResponse;
+import com.oussama_chatri.productivityx.features.events.dto.request.EventRequest;
+import com.oussama_chatri.productivityx.features.events.dto.response.EventResponse;
+import com.oussama_chatri.productivityx.features.events.service.EventService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/events")
+@RequiredArgsConstructor
+@Tag(name = "Events", description = "Calendar event management — CRUD, recurrence, trash/restore")
+public class EventController {
+
+    private final EventService eventService;
+
+    @PostMapping
+    @Operation(summary = "Create a calendar event",
+               description = "Pass recurrenceRule (iCal RRULE) for recurring events. " +
+                             "Pass recurrenceParentId to create an instance of an existing series.")
+    public ResponseEntity<ApiResponse<EventResponse>> create(
+            @Valid @RequestBody EventRequest request) {
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(ApiResponse.ok(eventService.create(request), "Event created."));
+    }
+
+    @GetMapping("/{id}")
+    @Operation(summary = "Get a single event by ID")
+    public ResponseEntity<ApiResponse<EventResponse>> getById(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(eventService.getById(id)));
+    }
+
+    @GetMapping
+    @Operation(summary = "List events",
+               description = "Pass 'from' and 'to' (ISO-8601 UTC or date-only) for a calendar range query. " +
+                             "Omit both for a paged listing ordered by startAt.")
+    public ResponseEntity<ApiResponse<?>> list(
+            @Parameter(description = "Range start — ISO-8601 UTC (e.g. 2026-04-01T00:00:00Z) or date-only (e.g. 2026-04-01)")
+            @RequestParam(required = false) String from,
+
+            @Parameter(description = "Range end — ISO-8601 UTC (e.g. 2026-04-30T23:59:59Z) or date-only (e.g. 2026-04-30)")
+            @RequestParam(required = false) String to,
+
+            @RequestParam(defaultValue = "0")  int page,
+            @RequestParam(defaultValue = "50") int size) {
+
+        if (from != null && to != null) {
+            Instant fromInstant = parseInstant(from);
+            Instant toInstant = parseInstant(to);
+            List<EventResponse> events = eventService.listByRange(fromInstant, toInstant);
+            return ResponseEntity.ok(ApiResponse.ok(events));
+        }
+
+        PagedResponse<EventResponse> paged = eventService.listPaged(page, size);
+        return ResponseEntity.ok(ApiResponse.ok(paged));
+    }
+
+    @GetMapping("/trash")
+    @Operation(summary = "List trashed events")
+    public ResponseEntity<ApiResponse<PagedResponse<EventResponse>>> listTrash(
+            @RequestParam(defaultValue = "0")  int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ResponseEntity.ok(ApiResponse.ok(eventService.listTrash(page, size)));
+    }
+
+    @PutMapping("/{id}")
+    @Operation(summary = "Update an event — all fields are optional",
+               description = "Only non-null fields in the request body are applied.")
+    public ResponseEntity<ApiResponse<EventResponse>> update(
+            @PathVariable UUID id,
+            @Valid @RequestBody EventRequest request) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(eventService.update(id, request), "Event updated."));
+    }
+
+    @DeleteMapping("/{id}")
+    @Operation(summary = "Soft-delete an event (move to trash)")
+    public ResponseEntity<ApiResponse<EventResponse>> softDelete(@PathVariable UUID id) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(eventService.softDelete(id), "Event moved to trash."));
+    }
+
+    @PatchMapping("/{id}/restore")
+    @Operation(summary = "Restore an event from trash")
+    public ResponseEntity<ApiResponse<EventResponse>> restore(@PathVariable UUID id) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(eventService.restore(id), "Event restored."));
+    }
+
+    @DeleteMapping("/{id}/permanent")
+    @Operation(summary = "Permanently delete an event — must be in trash first")
+    public ResponseEntity<ApiResponse<Void>> hardDelete(@PathVariable UUID id) {
+        eventService.hardDelete(id);
+        return ResponseEntity.ok(ApiResponse.message("Event permanently deleted."));
+    }
+
+    @DeleteMapping("/{id}/series")
+    @Operation(summary = "Delete all instances of a recurring series",
+               description = "Pass the parent event ID. " +
+                             "Soft-deletes the parent and all its recurring instances.")
+    public ResponseEntity<ApiResponse<Void>> deleteSeries(@PathVariable UUID id) {
+        eventService.deleteSeriesFromParent(id);
+        return ResponseEntity.ok(ApiResponse.message("Recurring series deleted."));
+    }
+
+    /**
+     * Parses an Instant from a string that may be either:
+     * - Full ISO-8601 datetime: 2026-04-01T00:00:00Z
+     * - Date-only: 2026-04-01 (assumes start of day UTC)
+     */
+    private Instant parseInstant(String value) {
+        if (value.contains("T")) {
+            return Instant.parse(value);
+        }
+        return LocalDate.parse(value).atStartOfDay(ZoneOffset.UTC).toInstant();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\events\dto\request\EventRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.events.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Data
+public class EventRequest {
+
+    @NotBlank(message = "Event title is required.")
+    @Size(max = 500, message = "Title must not exceed 500 characters.")
+    private String title;
+
+    private String description;
+
+    @Size(max = 255, message = "Location must not exceed 255 characters.")
+    private String location;
+
+    @NotNull(message = "Start time is required.")
+    private Instant startAt;
+
+    @NotNull(message = "End time is required.")
+    private Instant endAt;
+
+    private Boolean allDay;
+
+    @Pattern(regexp = "^#[0-9A-Fa-f]{6}$",
+             message = "Color must be a valid hex value (e.g. #6366F1).")
+    private String color;
+
+    // iCal RRULE — e.g. "FREQ=WEEKLY;BYDAY=MO,WE"
+    @Size(max = 255, message = "Recurrence rule must not exceed 255 characters.")
+    private String recurrenceRule;
+
+    private Instant recurrenceEndAt;
+
+    private Integer reminderMinutes;
+
+    // When editing a recurring event: the parent ID of the series to modify
+    private UUID recurrenceParentId;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\events\dto\response\EventResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.events.dto.response;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.oussama_chatri.productivityx.core.enums.SyncStatus;
+import com.oussama_chatri.productivityx.features.events.entity.Event;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class EventResponse {
+
+    private final UUID id;
+    private final UUID userId;
+
+    // Null for non-recurring or parent events
+    private final UUID recurrenceParentId;
+
+    private final String title;
+    private final String description;
+    private final String location;
+
+    private final Instant startAt;
+    private final Instant endAt;
+
+    private final boolean allDay;
+    private final String color;
+
+    private final String recurrenceRule;
+    private final Instant recurrenceEndAt;
+
+    private final Integer reminderMinutes;
+
+    private final boolean deleted;
+    private final Instant deletedAt;
+
+    private final int version;
+    private final SyncStatus syncStatus;
+
+    private final Instant createdAt;
+    private final Instant updatedAt;
+
+    public static EventResponse from(Event event) {
+        return EventResponse.builder()
+                .id(event.getId())
+                .userId(event.getUserId())
+                .recurrenceParentId(
+                        event.getRecurrenceParent() != null
+                                ? event.getRecurrenceParent().getId()
+                                : null)
+                .title(event.getTitle())
+                .description(event.getDescription())
+                .location(event.getLocation())
+                .startAt(event.getStartAt())
+                .endAt(event.getEndAt())
+                .allDay(event.isAllDay())
+                .color(event.getColor())
+                .recurrenceRule(event.getRecurrenceRule())
+                .recurrenceEndAt(event.getRecurrenceEndAt())
+                .reminderMinutes(event.getReminderMinutes())
+                .deleted(event.isDeleted())
+                .deletedAt(event.getDeletedAt())
+                .version(event.getVersion())
+                .syncStatus(event.getSyncStatus())
+                .createdAt(event.getCreatedAt())
+                .updatedAt(event.getUpdatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\controller\NoteController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.dto.PagedResponse;
+import com.oussama_chatri.productivityx.features.notes.dto.request.AddTagToNoteRequest;
+import com.oussama_chatri.productivityx.features.notes.dto.request.NoteRequest;
+import com.oussama_chatri.productivityx.features.notes.dto.response.NoteResponse;
+import com.oussama_chatri.productivityx.features.notes.service.NoteService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/notes")
+@RequiredArgsConstructor
+@Tag(name = "Notes", description = "CRUD, pinning, trash/restore, and tag management for notes")
+public class NoteController {
+
+    private final NoteService noteService;
+
+    @PostMapping
+    @Operation(summary = "Create a new note")
+    public ResponseEntity<ApiResponse<NoteResponse>> create(
+            @Valid @RequestBody NoteRequest request) {
+        return ResponseEntity.status(201)
+                .body(ApiResponse.ok(noteService.create(request), "Note created."));
+    }
+
+    @GetMapping("/{id}")
+    @Operation(summary = "Get a single note by ID")
+    public ResponseEntity<ApiResponse<NoteResponse>> getById(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.getById(id)));
+    }
+
+    @GetMapping
+    @Operation(summary = "List active (non-deleted) notes — optionally filter by tagId or pinned")
+    public ResponseEntity<ApiResponse<PagedResponse<NoteResponse>>> listActive(
+            @RequestParam(defaultValue = "0")  int  page,
+            @RequestParam(defaultValue = "20") int  size,
+            @RequestParam(required = false)    UUID tagId,
+            @RequestParam(required = false)    Boolean pinned) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                noteService.listActive(page, size, tagId, pinned)));
+    }
+
+    @GetMapping("/trash")
+    @Operation(summary = "List soft-deleted notes (trash)")
+    public ResponseEntity<ApiResponse<PagedResponse<NoteResponse>>> listTrash(
+            @RequestParam(defaultValue = "0")  int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.listTrash(page, size)));
+    }
+
+    @PutMapping("/{id}")
+    @Operation(summary = "Update a note — all fields optional")
+    public ResponseEntity<ApiResponse<NoteResponse>> update(
+            @PathVariable UUID id,
+            @Valid @RequestBody NoteRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.update(id, request), "Note updated."));
+    }
+
+    @PatchMapping("/{id}/pin")
+    @Operation(summary = "Pin a note")
+    public ResponseEntity<ApiResponse<NoteResponse>> pin(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.pin(id), "Note pinned."));
+    }
+
+    @PatchMapping("/{id}/unpin")
+    @Operation(summary = "Unpin a note")
+    public ResponseEntity<ApiResponse<NoteResponse>> unpin(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.unpin(id), "Note unpinned."));
+    }
+
+    @DeleteMapping("/{id}")
+    @Operation(summary = "Soft-delete a note (move to trash)")
+    public ResponseEntity<ApiResponse<NoteResponse>> softDelete(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.softDelete(id), "Note moved to trash."));
+    }
+
+    @PatchMapping("/{id}/restore")
+    @Operation(summary = "Restore a note from trash")
+    public ResponseEntity<ApiResponse<NoteResponse>> restore(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.restore(id), "Note restored."));
+    }
+
+    @DeleteMapping("/{id}/permanent")
+    @Operation(summary = "Permanently delete a trashed note")
+    public ResponseEntity<ApiResponse<Void>> hardDelete(@PathVariable UUID id) {
+        noteService.hardDelete(id);
+        return ResponseEntity.ok(ApiResponse.message("Note permanently deleted."));
+    }
+
+    @PostMapping("/{id}/tags")
+    @Operation(summary = "Add a tag to a note")
+    public ResponseEntity<ApiResponse<NoteResponse>> addTag(
+            @PathVariable UUID id,
+            @Valid @RequestBody AddTagToNoteRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.addTag(id, request), "Tag added."));
+    }
+
+    @DeleteMapping("/{id}/tags/{tagId}")
+    @Operation(summary = "Remove a tag from a note")
+    public ResponseEntity<ApiResponse<NoteResponse>> removeTag(
+            @PathVariable UUID id,
+            @PathVariable UUID tagId) {
+        return ResponseEntity.ok(ApiResponse.ok(noteService.removeTag(id, tagId), "Tag removed."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\controller\TagController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.notes.dto.request.TagRequest;
+import com.oussama_chatri.productivityx.features.notes.dto.response.TagResponse;
+import com.oussama_chatri.productivityx.features.notes.service.TagService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/tags")
+@RequiredArgsConstructor
+@Tag(name = "Tags", description = "User-scoped tag management")
+public class TagController {
+
+    private final TagService tagService;
+
+    @PostMapping
+    @Operation(summary = "Create a new tag")
+    public ResponseEntity<ApiResponse<TagResponse>> create(
+            @Valid @RequestBody TagRequest request) {
+        return ResponseEntity.status(201)
+                .body(ApiResponse.ok(tagService.create(request), "Tag created."));
+    }
+
+    @GetMapping
+    @Operation(summary = "List all tags for the current user")
+    public ResponseEntity<ApiResponse<List<TagResponse>>> listAll() {
+        return ResponseEntity.ok(ApiResponse.ok(tagService.listAll()));
+    }
+
+    @PutMapping("/{id}")
+    @Operation(summary = "Update a tag's name or color")
+    public ResponseEntity<ApiResponse<TagResponse>> update(
+            @PathVariable UUID id,
+            @Valid @RequestBody TagRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(tagService.update(id, request), "Tag updated."));
+    }
+
+    @DeleteMapping("/{id}")
+    @Operation(summary = "Delete a tag — removes it from all notes automatically")
+    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable UUID id) {
+        tagService.delete(id);
+        return ResponseEntity.ok(ApiResponse.message("Tag deleted."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\dto\request\AddTagToNoteRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.dto.request;
+
+import jakarta.validation.constraints.NotNull;
+import lombok.Data;
+
+import java.util.UUID;
+
+@Data
+public class AddTagToNoteRequest {
+
+    @NotNull(message = "Tag ID is required.")
+    private UUID tagId;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\dto\request\NoteRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.dto.request;
+
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+import java.util.Set;
+import java.util.UUID;
+
+@Data
+public class NoteRequest {
+
+    @Size(max = 500, message = "Title must not exceed 500 characters.")
+    private String title;
+
+    private String content;
+
+    private Set<UUID> tagIds;
+
+    private Boolean pinned;
+
+    /**
+     * The business version the client last observed for this note.
+     * Required on PUT to enable conflict detection and three-way merge.
+     * Ignored on POST (creation).
+     * Workflow:
+     *   - Client reads GET /notes/{id} → receives {version: 3, updatedAt: "..."}
+     *   - Client sends PUT /notes/{id} with {knownVersion: 3, clientUpdatedAt: "..."}
+     *   - Server compares knownVersion with stored version before writing
+     */
+    private Integer knownVersion;
+
+    /**
+     * The updatedAt timestamp the client last saw, in ISO-8601 UTC.
+     * Used to detect server-side changes that happened between the client's
+     * last fetch and this write attempt.
+     * The server NEVER uses this as the entity's updatedAt — the DB trigger
+     * always sets updated_at = NOW(). This field is used only for conflict
+     * detection comparison and is logged for audit purposes.
+     */
+    private String clientUpdatedAt;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\dto\request\TagRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class TagRequest {
+
+    @NotBlank(message = "Tag name is required.")
+    @Size(min = 1, max = 50, message = "Tag name must be between 1 and 50 characters.")
+    private String name;
+
+    @Pattern(regexp = "^#[0-9A-Fa-f]{6}$", message = "Color must be a valid hex color (e.g. #6366F1).")
+    private String color;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\dto\response\NoteResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.dto.response;
+
+import com.oussama_chatri.productivityx.core.enums.SyncStatus;
+import com.oussama_chatri.productivityx.features.notes.entity.Note;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Getter
+@Builder
+public class NoteResponse {
+
+    private final UUID id;
+    private final UUID userId;
+    private final String title;
+    private final String content;
+    private final String plainTextContent;
+    private final int wordCount;
+    private final int readingTimeSeconds;
+    private final boolean pinned;
+    private final boolean deleted;
+    private final Instant deletedAt;
+    private final int version;
+    private final SyncStatus syncStatus;
+    private final Set<TagResponse> tags;
+    private final Instant createdAt;
+    private final Instant updatedAt;
+
+    public static NoteResponse from(Note note) {
+        return NoteResponse.builder()
+                .id(note.getId())
+                .userId(note.getUserId())
+                .title(note.getTitle())
+                .content(note.getContent())
+                .plainTextContent(note.getPlainTextContent())
+                .wordCount(note.getWordCount())
+                .readingTimeSeconds(note.getReadingTimeSeconds())
+                .pinned(note.isPinned())
+                .deleted(note.isDeleted())
+                .deletedAt(note.getDeletedAt())
+                .version(note.getVersion())
+                .syncStatus(note.getSyncStatus())
+                .tags(note.getTags().stream()
+                        .map(TagResponse::from)
+                        .collect(Collectors.toSet()))
+                .createdAt(note.getCreatedAt())
+                .updatedAt(note.getUpdatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\notes\dto\response\TagResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.notes.dto.response;
+
+import com.oussama_chatri.productivityx.features.notes.entity.Tag;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+public class TagResponse {
+
+    private final UUID id;
+    private final UUID userId;
+    private final String name;
+    private final String color;
+    private final Instant createdAt;
+
+    public static TagResponse from(Tag tag) {
+        return TagResponse.builder()
+                .id(tag.getId())
+                .userId(tag.getUserId())
+                .name(tag.getName())
+                .color(tag.getColor())
+                .createdAt(tag.getCreatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\pomodoro\controller\PomodoroController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.pomodoro.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.dto.PagedResponse;
+import com.oussama_chatri.productivityx.features.pomodoro.dto.request.EndSessionRequest;
+import com.oussama_chatri.productivityx.features.pomodoro.dto.request.InterruptSessionRequest;
+import com.oussama_chatri.productivityx.features.pomodoro.dto.request.StartSessionRequest;
+import com.oussama_chatri.productivityx.features.pomodoro.dto.response.PomodoroSessionResponse;
+import com.oussama_chatri.productivityx.features.pomodoro.dto.response.PomodoroStatsResponse;
+import com.oussama_chatri.productivityx.features.pomodoro.service.PomodoroService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/pomodoro")
+@RequiredArgsConstructor
+@Tag(name = "Pomodoro", description = "Pomodoro session lifecycle — start, end, interrupt, history, stats")
+public class PomodoroController {
+
+    private final PomodoroService pomodoroService;
+
+    @PostMapping("/sessions/start")
+    @Operation(summary = "Start a new Pomodoro session",
+               description = "Rejects with 400 if an active session already exists. " +
+                             "Session settings are snapshotted from the user's current preferences " +
+                             "so history stays accurate after settings change. " +
+                             "Pass taskId to link the session to a task — focus time is credited automatically on end.")
+    public ResponseEntity<ApiResponse<PomodoroSessionResponse>> startSession(
+            @Valid @RequestBody StartSessionRequest request) {
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(ApiResponse.ok(pomodoroService.startSession(request), "Session started."));
+    }
+
+    @PatchMapping("/sessions/{id}/end")
+    @Operation(summary = "End (complete) an active session",
+               description = "Marks the session as completed and credits actual focus minutes " +
+                             "to the linked task. The client may supply actualDurationSeconds " +
+                             "for accuracy — the server validates it against its own clock.")
+    public ResponseEntity<ApiResponse<PomodoroSessionResponse>> endSession(
+            @PathVariable UUID id,
+            @Valid @RequestBody(required = false) EndSessionRequest request) {
+        EndSessionRequest body = request != null ? request : new EndSessionRequest();
+        return ResponseEntity.ok(
+                ApiResponse.ok(pomodoroService.endSession(id, body), "Session completed."));
+    }
+
+    @PatchMapping("/sessions/{id}/interrupt")
+    @Operation(summary = "Interrupt (stop early) an active session",
+               description = "Marks the session as interrupted. Partial focus time is still credited " +
+                             "to the linked task. An optional reason can be supplied.")
+    public ResponseEntity<ApiResponse<PomodoroSessionResponse>> interruptSession(
+            @PathVariable UUID id,
+            @Valid @RequestBody(required = false) InterruptSessionRequest request) {
+        InterruptSessionRequest body = request != null ? request : new InterruptSessionRequest();
+        return ResponseEntity.ok(
+                ApiResponse.ok(pomodoroService.interruptSession(id, body), "Session interrupted."));
+    }
+
+    @GetMapping("/sessions/active")
+    @Operation(summary = "Get the currently active session",
+               description = "Returns null data (not an error) when no session is running. " +
+                             "Clients poll this on app foreground to resume a session started " +
+                             "on another device.")
+    public ResponseEntity<ApiResponse<PomodoroSessionResponse>> getActiveSession() {
+        return ResponseEntity.ok(ApiResponse.ok(pomodoroService.getActiveSession()));
+    }
+
+    @GetMapping("/sessions/{id}")
+    @Operation(summary = "Get a single session by ID")
+    public ResponseEntity<ApiResponse<PomodoroSessionResponse>> getById(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(pomodoroService.getById(id)));
+    }
+
+    @GetMapping("/sessions")
+    @Operation(summary = "List session history",
+               description = "Returns all sessions newest-first. Pass taskId to filter " +
+                             "to sessions linked to a specific task.")
+    public ResponseEntity<ApiResponse<PagedResponse<PomodoroSessionResponse>>> listSessions(
+            @RequestParam(defaultValue = "0")  int  page,
+            @RequestParam(defaultValue = "20") int  size,
+            @Parameter(description = "Filter to sessions linked to this task ID")
+            @RequestParam(required = false)    UUID taskId) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(pomodoroService.listSessions(page, size, taskId)));
+    }
+
+    @GetMapping("/stats/today")
+    @Operation(summary = "Get today's Pomodoro stats",
+               description = "Returns completed session count and total focus minutes for today (UTC). " +
+                             "Used by the home dashboard and the AI context panel.")
+    public ResponseEntity<ApiResponse<PomodoroStatsResponse>> getTodayStats() {
+        return ResponseEntity.ok(ApiResponse.ok(pomodoroService.getTodayStats()));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\pomodoro\dto\request\EndSessionRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.pomodoro.dto.request;
+
+import jakarta.validation.constraints.Positive;
+import lombok.Data;
+
+@Data
+public class EndSessionRequest {
+
+    // Actual seconds the user focused — client sends this for accuracy;
+    // server also computes it from startedAt for validation
+    @Positive(message = "Actual duration must be a positive number of seconds.")
+    private Integer actualDurationSeconds;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\pomodoro\dto\request\InterruptSessionRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.pomodoro.dto.request;
+
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class InterruptSessionRequest {
+
+    // How many seconds actually elapsed before the interruption
+    @Positive(message = "Actual duration must be a positive number of seconds.")
+    private Integer actualDurationSeconds;
+
+    // Optional note on why the session was interrupted
+    @Size(max = 255, message = "Interrupt reason must not exceed 255 characters.")
+    private String interruptReason;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\pomodoro\dto\request\StartSessionRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.pomodoro.dto.request;
+
+import com.oussama_chatri.productivityx.core.enums.PomodoroType;
+import jakarta.validation.constraints.NotNull;
+import lombok.Data;
+
+import java.util.UUID;
+
+@Data
+public class StartSessionRequest {
+
+    @NotNull(message = "Session type is required (FOCUS, SHORT_BREAK, LONG_BREAK).")
+    private PomodoroType type;
+
+    // Optional — links the session to a task so actual minutes are tracked on that task
+    private UUID taskId;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\pomodoro\dto\response\PomodoroSessionResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.pomodoro.dto.response;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.oussama_chatri.productivityx.core.enums.PomodoroType;
+import com.oussama_chatri.productivityx.features.pomodoro.entity.PomodoroSession;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class PomodoroSessionResponse {
+
+    private final UUID id;
+    private final UUID userId;
+    private final UUID taskId;
+
+    private final PomodoroType type;
+
+    private final int plannedDurationSeconds;
+    private final Integer actualDurationSeconds;
+
+    private final boolean interrupted;
+    private final String interruptReason;
+
+    // Settings snapshot so the client can display what settings were in effect
+    private final int focusMinutesSetting;
+    private final int shortBreakMinutesSetting;
+    private final int longBreakMinutesSetting;
+
+    private final Instant startedAt;
+    private final Instant endedAt;
+
+    private final boolean completed;
+
+    // Convenience field — actual focus minutes rounded up for display
+    private final Integer actualMinutes;
+
+    private final Instant createdAt;
+
+    public static PomodoroSessionResponse from(PomodoroSession session) {
+        Integer actualMinutes = session.getActualDurationSeconds() != null
+                ? (int) Math.ceil(session.getActualDurationSeconds() / 60.0)
+                : null;
+
+        return PomodoroSessionResponse.builder()
+                .id(session.getId())
+                .userId(session.getUserId())
+                .taskId(session.getTaskId())
+                .type(session.getType())
+                .plannedDurationSeconds(session.getPlannedDurationSeconds())
+                .actualDurationSeconds(session.getActualDurationSeconds())
+                .interrupted(session.isInterrupted())
+                .interruptReason(session.getInterruptReason())
+                .focusMinutesSetting(session.getFocusMinutesSetting())
+                .shortBreakMinutesSetting(session.getShortBreakMinutesSetting())
+                .longBreakMinutesSetting(session.getLongBreakMinutesSetting())
+                .startedAt(session.getStartedAt())
+                .endedAt(session.getEndedAt())
+                .completed(session.isCompleted())
+                .actualMinutes(actualMinutes)
+                .createdAt(session.getCreatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\pomodoro\dto\response\PomodoroStatsResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.pomodoro.dto.response;
+
+import lombok.Builder;
+import lombok.Getter;
+
+@Getter
+@Builder
+public class PomodoroStatsResponse {
+
+    private final long completedFocusSessionsToday;
+    private final long totalFocusMinutesToday;
+    private final long totalFocusSecondsToday;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\preferences\controller\PreferencesController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.preferences.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.preferences.dto.request.UpdatePreferencesRequest;
+import com.oussama_chatri.productivityx.features.preferences.dto.response.UserPreferencesResponse;
+import com.oussama_chatri.productivityx.features.preferences.service.PreferencesService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/v1/preferences")
+@RequiredArgsConstructor
+@Tag(name = "Preferences", description = "User preferences — Pomodoro settings, notifications, views, AI, display")
+public class PreferencesController {
+
+    private final PreferencesService preferencesService;
+
+    @GetMapping
+    @Operation(summary = "Get the current user's preferences")
+    public ResponseEntity<ApiResponse<UserPreferencesResponse>> getPreferences() {
+        return ResponseEntity.ok(ApiResponse.ok(preferencesService.getPreferences()));
+    }
+
+    @PutMapping
+    @Operation(summary = "Update preferences — all fields are optional (partial updates supported)")
+    public ResponseEntity<ApiResponse<UserPreferencesResponse>> updatePreferences(
+            @Valid @RequestBody UpdatePreferencesRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                preferencesService.updatePreferences(request), "Preferences updated."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\preferences\dto\request\UpdatePreferencesRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.preferences.dto.request;
+
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import lombok.Data;
+
+@Data
+public class UpdatePreferencesRequest {
+
+    @Min(value = 1, message = "Focus duration must be at least 1 minute.")
+    @Max(value = 120, message = "Focus duration must not exceed 120 minutes.")
+    private Integer pomodoroFocusMinutes;
+
+    @Min(value = 1, message = "Short break must be at least 1 minute.")
+    @Max(value = 60, message = "Short break must not exceed 60 minutes.")
+    private Integer pomodoroShortBreakMinutes;
+
+    @Min(value = 1, message = "Long break must be at least 1 minute.")
+    @Max(value = 60, message = "Long break must not exceed 60 minutes.")
+    private Integer pomodoroLongBreakMinutes;
+
+    @Min(value = 1, message = "Cycles must be at least 1.")
+    @Max(value = 10, message = "Cycles must not exceed 10.")
+    private Integer pomodoroCyclesBeforeLongBreak;
+
+    private Boolean pomodoroAutoStartBreaks;
+    private Boolean pomodoroAutoStartFocus;
+    private Boolean pomodoroSoundEnabled;
+
+    private Boolean notifyTaskReminders;
+    private Boolean notifyEventReminders;
+    private Boolean notifyPomodoroEnd;
+    private Boolean notifyDailySummary;
+
+    private String defaultTaskView;
+    private String defaultTaskSort;
+    private Boolean showCompletedTasks;
+    private String defaultCalendarView;
+    private String weekStartsOn;
+
+    private Boolean aiContextEnabled;
+    private String aiModel;
+
+    private Boolean compactMode;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\preferences\dto\response\UserPreferencesResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.preferences.dto.response;
+
+import com.oussama_chatri.productivityx.features.preferences.entity.UserPreferences;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+public class UserPreferencesResponse {
+
+    private final UUID id;
+    private final UUID userId;
+
+    private final int pomodoroFocusMinutes;
+    private final int pomodoroShortBreakMinutes;
+    private final int pomodoroLongBreakMinutes;
+    private final int pomodoroCyclesBeforeLongBreak;
+    private final boolean pomodoroAutoStartBreaks;
+    private final boolean pomodoroAutoStartFocus;
+    private final boolean pomodoroSoundEnabled;
+
+    private final boolean notifyTaskReminders;
+    private final boolean notifyEventReminders;
+    private final boolean notifyPomodoroEnd;
+    private final boolean notifyDailySummary;
+
+    private final String defaultTaskView;
+    private final String defaultTaskSort;
+    private final boolean showCompletedTasks;
+    private final String defaultCalendarView;
+    private final String weekStartsOn;
+
+    private final boolean aiContextEnabled;
+    private final String aiModel;
+
+    private final boolean compactMode;
+
+    private final Instant updatedAt;
+
+    public static UserPreferencesResponse from(UserPreferences prefs) {
+        return UserPreferencesResponse.builder()
+                .id(prefs.getId())
+                .userId(prefs.getUserId())
+                .pomodoroFocusMinutes(prefs.getPomodoroFocusMinutes())
+                .pomodoroShortBreakMinutes(prefs.getPomodoroShortBreakMinutes())
+                .pomodoroLongBreakMinutes(prefs.getPomodoroLongBreakMinutes())
+                .pomodoroCyclesBeforeLongBreak(prefs.getPomodoroCyclesBeforeLongBreak())
+                .pomodoroAutoStartBreaks(prefs.isPomodoroAutoStartBreaks())
+                .pomodoroAutoStartFocus(prefs.isPomodoroAutoStartFocus())
+                .pomodoroSoundEnabled(prefs.isPomodoroSoundEnabled())
+                .notifyTaskReminders(prefs.isNotifyTaskReminders())
+                .notifyEventReminders(prefs.isNotifyEventReminders())
+                .notifyPomodoroEnd(prefs.isNotifyPomodoroEnd())
+                .notifyDailySummary(prefs.isNotifyDailySummary())
+                .defaultTaskView(prefs.getDefaultTaskView())
+                .defaultTaskSort(prefs.getDefaultTaskSort())
+                .showCompletedTasks(prefs.isShowCompletedTasks())
+                .defaultCalendarView(prefs.getDefaultCalendarView())
+                .weekStartsOn(prefs.getWeekStartsOn())
+                .aiContextEnabled(prefs.isAiContextEnabled())
+                .aiModel(prefs.getAiModel())
+                .compactMode(prefs.isCompactMode())
+                .updatedAt(prefs.getUpdatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\profile\controller\ProfileController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.profile.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.profile.dto.request.UpdateAvatarRequest;
+import com.oussama_chatri.productivityx.features.profile.dto.request.UpdateProfileRequest;
+import com.oussama_chatri.productivityx.features.profile.dto.response.ProfileResponse;
+import com.oussama_chatri.productivityx.features.profile.service.ProfileService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/v1/profile")
+@RequiredArgsConstructor
+@Tag(name = "Profile", description = "User profile — name, avatar, bio, timezone, language, theme")
+public class ProfileController {
+
+    private final ProfileService profileService;
+
+    @GetMapping
+    @Operation(summary = "Get the current user's profile")
+    public ResponseEntity<ApiResponse<ProfileResponse>> getProfile() {
+        return ResponseEntity.ok(ApiResponse.ok(profileService.getProfile()));
+    }
+
+    @PutMapping
+    @Operation(summary = "Update the current user's profile — all fields are optional")
+    public ResponseEntity<ApiResponse<ProfileResponse>> updateProfile(
+            @Valid @RequestBody UpdateProfileRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                profileService.updateProfile(request), "Profile updated."));
+    }
+
+    @PatchMapping("/avatar")
+    @Operation(summary = "Update the current user's avatar URL")
+    public ResponseEntity<ApiResponse<ProfileResponse>> updateAvatar(
+            @Valid @RequestBody UpdateAvatarRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                profileService.updateAvatar(request), "Avatar updated."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\profile\dto\request\UpdateAvatarRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.profile.dto.request;
+
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
+@Data
+public class UpdateAvatarRequest {
+
+    @NotBlank(message = "Avatar URL is required.")
+    private String avatarUrl;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\profile\dto\request\UpdateProfileRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.profile.dto.request;
+
+import com.oussama_chatri.productivityx.core.enums.Language;
+import com.oussama_chatri.productivityx.core.enums.Theme;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+@Data
+public class UpdateProfileRequest {
+
+    @Size(max = 50, message = "First name must not exceed 50 characters.")
+    private String firstName;
+
+    @Size(max = 50, message = "Last name must not exceed 50 characters.")
+    private String lastName;
+
+    @Size(max = 500, message = "Bio must not exceed 500 characters.")
+    private String bio;
+
+    @Size(max = 50, message = "Timezone must not exceed 50 characters.")
+    private String timezone;
+
+    private Language language;
+
+    private Theme theme;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\profile\dto\response\ProfileResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.profile.dto.response;
+
+import com.oussama_chatri.productivityx.core.enums.Language;
+import com.oussama_chatri.productivityx.core.enums.Theme;
+import com.oussama_chatri.productivityx.features.profile.entity.Profile;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+public class ProfileResponse {
+
+    private final UUID id;
+    private final UUID userId;
+    private final String firstName;
+    private final String lastName;
+    private final String fullName;
+    private final String avatarUrl;
+    private final String bio;
+    private final String timezone;
+    private final Language language;
+    private final Theme theme;
+    private final Instant createdAt;
+    private final Instant updatedAt;
+
+    public static ProfileResponse from(Profile profile) {
+        return ProfileResponse.builder()
+                .id(profile.getId())
+                .userId(profile.getUserId())
+                .firstName(profile.getFirstName())
+                .lastName(profile.getLastName())
+                .fullName(profile.getFirstName() + " " + profile.getLastName())
+                .avatarUrl(profile.getAvatarUrl())
+                .bio(profile.getBio())
+                .timezone(profile.getTimezone())
+                .language(profile.getLanguage())
+                .theme(profile.getTheme())
+                .createdAt(profile.getCreatedAt())
+                .updatedAt(profile.getUpdatedAt())
+                .build();
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\search\controller\SearchController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.search.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.search.dto.response.SearchResponse;
+import com.oussama_chatri.productivityx.features.search.service.SearchService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/v1/search")
+@RequiredArgsConstructor
+@Tag(name = "Search", description = "Unified full-text search across notes, tasks, and events")
+public class SearchController {
+
+    private final SearchService searchService;
+
+    @GetMapping
+    @Operation(
+            summary = "Search across notes, tasks, and events",
+            description = "Pass 'types' as a comma-separated list to restrict results " +
+                          "(e.g. types=NOTE,TASK). Omit to search all types. " +
+                          "Results are ordered by updatedAt desc."
+    )
+    public ResponseEntity<ApiResponse<SearchResponse>> search(
+            @Parameter(description = "Search query — minimum 2 characters recommended")
+            @RequestParam String q,
+
+            @Parameter(description = "Comma-separated result types: NOTE, TASK, EVENT")
+            @RequestParam(required = false) String types,
+
+            @Parameter(description = "Maximum total results (default 10, max 50)")
+            @RequestParam(defaultValue = "10") int limit) {
+
+        int safeLimit = Math.min(Math.max(limit, 1), 50);
+        return ResponseEntity.ok(ApiResponse.ok(searchService.search(q, types, safeLimit)));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\search\dto\response\SearchResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.search.dto.response;
+
+import lombok.Builder;
+import lombok.Getter;
+
+import java.util.List;
+
+@Getter
+@Builder
+public class SearchResponse {
+
+    private final List<SearchResult> results;
+    private final int total;
+    private final String query;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\search\dto\response\SearchResult.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.search.dto.response;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.UUID;
+
+@Getter
+@Builder
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class SearchResult {
+
+    public enum ResultType { NOTE, TASK, EVENT }
+
+    private final UUID id;
+    private final ResultType type;
+    private final String title;
+    private final String snippet;
+    private final Instant updatedAt;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\sync\controller\SyncController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.sync.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.features.sync.dto.response.DeltaSyncResponse;
+import com.oussama_chatri.productivityx.features.sync.service.SyncService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Instant;
+
+@RestController
+@RequestMapping("/api/v1/sync")
+@RequiredArgsConstructor
+@Tag(name = "Sync", description = "Offline-first delta sync — pull all changes since a given timestamp with stable cursor pagination")
+public class SyncController {
+
+    private final SyncService syncService;
+
+    @GetMapping("/delta")
+    @Operation(
+            summary = "Pull changes since a given timestamp (cursor-paginated)",
+            description = """
+                    Returns entities modified after `since`, paginated by a stable cursor.
+                    
+                    **Pagination flow:**
+                    1. Call with `since` only (no cursor) — returns first page.
+                    2. If `hasMore == true`, call again with `cursor=<nextCursor>`.
+                    3. Repeat until `hasMore == false`.
+                    4. Store `syncedAt` from the last page as your new `since` value.
+                    
+                    **Why cursor instead of offset?**
+                    Offset pagination breaks when new rows are inserted mid-sync.
+                    Cursor uses `(updatedAt, id)` ordering which is stable regardless
+                    of concurrent inserts.
+                    
+                    Soft-deleted entities are included — clients should remove them locally
+                    when `deleted == true`.
+                    """
+    )
+    public ResponseEntity<ApiResponse<DeltaSyncResponse>> delta(
+            @Parameter(description = "ISO-8601 UTC timestamp. Return all entities changed after this point.")
+            @RequestParam
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
+            Instant since,
+
+            @Parameter(description = "Opaque cursor from the previous page's nextCursor field. Omit on the first call.")
+            @RequestParam(required = false)
+            String cursor,
+
+            @Parameter(description = "Maximum items per page across all entity types combined. Range: 10–500.")
+            @RequestParam(defaultValue = "100")
+            int limit) {
+
+        limit = Math.max(10, Math.min(500, limit));
+        return ResponseEntity.ok(ApiResponse.ok(syncService.delta(since, cursor, limit)));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\sync\dto\response\DeltaSyncResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.sync.dto.response;
+
+import com.oussama_chatri.productivityx.features.events.dto.response.EventResponse;
+import com.oussama_chatri.productivityx.features.notes.dto.response.NoteResponse;
+import com.oussama_chatri.productivityx.features.pomodoro.dto.response.PomodoroSessionResponse;
+import com.oussama_chatri.productivityx.features.tasks.dto.response.TaskResponse;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * Delta sync response with cursor-based pagination.
+ *
+ * <p>Pagination flow:
+ * <ol>
+ *   <li>Client calls {@code GET /api/v1/sync/delta?since=<ISO>&limit=100}
+ *       (no cursor on first page).</li>
+ *   <li>If {@code hasMore == true}, client calls again with {@code cursor=<nextCursor>}.</li>
+ *   <li>Client repeats until {@code hasMore == false}.</li>
+ *   <li>Client stores {@code syncedAt} from the last page as its new {@code since} value.</li>
+ * </ol>
+ *
+ * <p>Soft-deleted entities are included with their {@code deleted} flag set to {@code true}
+ * so clients can remove them from local storage.
+ */
+@Getter
+@Builder
+public class DeltaSyncResponse {
+
+    private final List<NoteResponse>            notes;
+    private final List<TaskResponse>            tasks;
+    private final List<EventResponse>           events;
+    private final List<PomodoroSessionResponse> pomodoroSessions;
+
+    /**
+     * Opaque cursor for the next page — pass as {@code cursor} query param.
+     * Format: {@code <updatedAtEpochMs>:<entityId>} — the last entity's position.
+     * Null when there are no more pages.
+     */
+    private final String  nextCursor;
+
+    /** True when there are more items beyond this page. */
+    private final boolean hasMore;
+
+    /**
+     * Server's current timestamp — client stores this as the new {@code since} value
+     * after all pages are consumed.
+     */
+    private final Instant syncedAt;
+
+    /** Total items in this page (not the total across all pages). */
+    private final int totalChanges;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\tasks\controller\TaskController.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.tasks.controller;
+
+import com.oussama_chatri.productivityx.core.dto.ApiResponse;
+import com.oussama_chatri.productivityx.core.dto.PagedResponse;
+import com.oussama_chatri.productivityx.core.enums.TaskPriority;
+import com.oussama_chatri.productivityx.core.enums.TaskStatus;
+import com.oussama_chatri.productivityx.features.tasks.dto.request.ReorderRequest;
+import com.oussama_chatri.productivityx.features.tasks.dto.request.TaskRequest;
+import com.oussama_chatri.productivityx.features.tasks.dto.request.UpdateStatusRequest;
+import com.oussama_chatri.productivityx.features.tasks.dto.response.TaskResponse;
+import com.oussama_chatri.productivityx.features.tasks.service.TaskService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/tasks")
+@RequiredArgsConstructor
+@Tag(name = "Tasks", description = "Task management — CRUD, subtasks, kanban status, drag-drop reorder")
+public class TaskController {
+
+    private final TaskService taskService;
+
+    @PostMapping
+    @Operation(summary = "Create a task or subtask",
+               description = "Pass parentTaskId to create a subtask (max 2 levels deep). " +
+                             "Omit it for a top-level task.")
+    public ResponseEntity<ApiResponse<TaskResponse>> create(
+            @Valid @RequestBody TaskRequest request) {
+        return ResponseEntity
+                .status(HttpStatus.CREATED)
+                .body(ApiResponse.ok(taskService.create(request), "Task created."));
+    }
+
+    @GetMapping
+    @Operation(summary = "List tasks",
+               description = "All top-level tasks by default. " +
+                             "Pass parentId to list subtasks. " +
+                             "Filter by status or priority as needed.")
+    public ResponseEntity<ApiResponse<PagedResponse<TaskResponse>>> list(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size,
+            @Parameter(description = "Filter by status: TODO, IN_PROGRESS, ON_HOLD, DONE, CANCELLED")
+            @RequestParam(required = false) TaskStatus status,
+            @Parameter(description = "Filter by priority: LOW, MEDIUM, HIGH, URGENT")
+            @RequestParam(required = false) TaskPriority priority,
+            @Parameter(description = "Return subtasks of this parent task ID instead of top-level tasks")
+            @RequestParam(required = false) UUID parentId) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(taskService.list(page, size, status, priority, parentId)));
+    }
+
+    @GetMapping("/trash")
+    @Operation(summary = "List trashed tasks",
+               description = "Top-level tasks in the trash only. Subtasks are trashed implicitly.")
+    public ResponseEntity<ApiResponse<PagedResponse<TaskResponse>>> listTrash(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ResponseEntity.ok(ApiResponse.ok(taskService.listTrash(page, size)));
+    }
+
+    @GetMapping("/{id}")
+    @Operation(summary = "Get a single task with its subtasks")
+    public ResponseEntity<ApiResponse<TaskResponse>> getById(@PathVariable UUID id) {
+        return ResponseEntity.ok(ApiResponse.ok(taskService.getById(id)));
+    }
+
+    @PutMapping("/{id}")
+    @Operation(summary = "Full update of a task",
+               description = "Only non-null request fields are applied. " +
+                             "Status change via this endpoint also manages completedAt.")
+    public ResponseEntity<ApiResponse<TaskResponse>> update(
+            @PathVariable UUID id,
+            @Valid @RequestBody TaskRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(taskService.update(id, request), "Task updated."));
+    }
+
+    @PatchMapping("/{id}/status")
+    @Operation(summary = "Update task status",
+               description = "Dedicated status transition endpoint. " +
+                             "Automatically sets completedAt when transitioning to DONE, " +
+                             "and clears it when transitioning away.")
+    public ResponseEntity<ApiResponse<TaskResponse>> updateStatus(
+            @PathVariable UUID id,
+            @Valid @RequestBody UpdateStatusRequest request) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(taskService.updateStatus(id, request), "Status updated."));
+    }
+
+    @PatchMapping("/reorder")
+    @Operation(summary = "Bulk reorder tasks",
+               description = "Accepts a list of {id, position} pairs. " +
+                             "All IDs must belong to the authenticated user. " +
+                             "Used for kanban drag-and-drop and list reordering.")
+    public ResponseEntity<ApiResponse<Void>> reorder(@Valid @RequestBody ReorderRequest request) {
+        taskService.reorder(request);
+        return ResponseEntity.ok(ApiResponse.message("Tasks reordered."));
+    }
+
+    @PatchMapping("/{id}/restore")
+    @Operation(summary = "Restore a task from trash",
+               description = "Does not cascade to subtasks — restore each subtask explicitly.")
+    public ResponseEntity<ApiResponse<TaskResponse>> restore(@PathVariable UUID id) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(taskService.restore(id), "Task restored."));
+    }
+
+    @DeleteMapping("/{id}")
+    @Operation(summary = "Soft-delete a task",
+               description = "Moves the task and all its direct subtasks to the trash.")
+    public ResponseEntity<ApiResponse<TaskResponse>> softDelete(@PathVariable UUID id) {
+        return ResponseEntity.ok(
+                ApiResponse.ok(taskService.softDelete(id), "Task moved to trash."));
+    }
+
+    @DeleteMapping("/{id}/permanent")
+    @Operation(summary = "Permanently delete a task",
+               description = "The task must already be in the trash. " +
+                             "Subtasks are removed by cascade (ON DELETE CASCADE in DB).")
+    public ResponseEntity<ApiResponse<Void>> hardDelete(@PathVariable UUID id) {
+        taskService.hardDelete(id);
+        return ResponseEntity.ok(ApiResponse.message("Task permanently deleted."));
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\tasks\dto\request\ReorderRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.tasks.dto.request;
+
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import lombok.Data;
+
+import java.util.List;
+import java.util.UUID;
+
+@Data
+public class ReorderRequest {
+
+    @NotNull(message = "Items list is required.")
+    @Valid
+    private List<ReorderItem> items;
+
+    @Data
+    public static class ReorderItem {
+
+        @NotNull(message = "Task ID is required.")
+        private UUID id;
+
+        // Zero-based position within the target column / list
+        @NotNull(message = "Position is required.")
+        private Integer position;
+    }
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\tasks\dto\request\TaskRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.tasks.dto.request;
+
+import com.oussama_chatri.productivityx.core.enums.TaskPriority;
+import com.oussama_chatri.productivityx.core.enums.TaskStatus;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
+import lombok.Data;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.UUID;
+
+@Data
+public class TaskRequest {
+
+    @NotBlank(message = "Task title is required.")
+    @Size(max = 500, message = "Title must not exceed 500 characters.")
+    private String title;
+
+    // Plain text or Markdown description — no server-side size cap; TEXT column in DB
+    private String description;
+
+    // Nullable on create — defaults to TODO in service layer
+    private TaskStatus status;
+
+    // Nullable on create — defaults to MEDIUM in service layer
+    private TaskPriority priority;
+
+    private LocalDate dueDate;
+
+    // Only meaningful when dueDate is also set
+    private LocalTime dueTime;
+
+    private Instant reminderAt;
+
+    @Positive(message = "Estimated minutes must be a positive number.")
+    private Integer estimatedMinutes;
+
+    // Null means top-level task; non-null means subtask
+    private UUID parentTaskId;
+
+    // Links this task to a calendar event — validated for ownership in service
+    private UUID linkedEventId;
+
+    // Explicit position for client-driven ordering on create; service assigns 0 if absent
+    private Integer position;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\tasks\dto\request\UpdateStatusRequest.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.tasks.dto.request;
+
+import com.oussama_chatri.productivityx.core.enums.TaskStatus;
+import jakarta.validation.constraints.NotNull;
+import lombok.Data;
+
+@Data
+public class UpdateStatusRequest {
+
+    @NotNull(message = "Status is required.")
+    private TaskStatus status;
+}
+
+
+============================================================
+FILE: C:\Users\Oussama Chatri\Documents\Oussama\Oussama\Portfolio\ProductivityX\productivityx_backend\src\main\java\com\oussama_chatri\productivityx\features\tasks\dto\response\TaskResponse.java
+============================================================
+
+package com.oussama_chatri.productivityx.features.tasks.dto.response;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.oussama_chatri.productivityx.core.enums.SyncStatus;
+import com.oussama_chatri.productivityx.core.enums.TaskPriority;
+import com.oussama_chatri.productivityx.core.enums.TaskStatus;
+import com.oussama_chatri.productivityx.features.tasks.entity.Task;
+import lombok.Builder;
+import lombok.Getter;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Getter
+@Builder
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class TaskResponse {
+
+    private final UUID id;
+    private final UUID userId;
+
+    // Null for top-level tasks
+    private final UUID parentTaskId;
+
+    private final UUID linkedEventId;
+
+    private final String title;
+    private final String description;
+
+    private final TaskStatus status;
+    private final TaskPriority priority;
+
+    private final LocalDate dueDate;
+    private final LocalTime dueTime;
+    private final Instant reminderAt;
+
+    private final Integer estimatedMinutes;
+    private final int actualMinutes;
+
+    private final Instant completedAt;
+
+    private final int position;
+
+    private final boolean deleted;
+    private final Instant deletedAt;
+
+    private final int version;
+    private final SyncStatus syncStatus;
+
+    // Populated only on single-task (getById) queries — null on list responses
+    private final List<TaskResponse> subtasks;
+
+    private final Instant createdAt;
+    private final Instant updatedAt;
+
+    // Lightweight factory — subtasks NOT included (used for list / page responses)
+    public static TaskResponse from(Task task) {
+        return builder()
+                .id(task.getId())
+                .userId(task.getUserId())
+                .parentTaskId(task.getParentTask() != null ? task.getParentTask().getId() : null)
+                .linkedEventId(task.getLinkedEventId())
+                .title(task.getTitle())
+                .description(task.getDescription())
+                .status(task.getStatus())
+                .priority(task.getPriority())
+                .dueDate(task.getDueDate())
+                .dueTime(task.getDueTime())
+                .reminderAt(task.getReminderAt())
+                .estimatedMinutes(task.getEstimatedMinutes())
+                .actualMinutes(task.getActualMinutes())
+                .completedAt(task.getCompletedAt())
+                .position(task.getPosition())
+                .deleted(task.isDeleted())
+                .deletedAt(task.getDeletedAt())
+                .version(task.getVersion())
+                .syncStatus(task.getSyncStatus())
+                .createdAt(task.getCreatedAt())
+                .updatedAt(task.getUpdatedAt())
+                .build();
+    }
+
+    // Full factory — includes subtasks (used for single-task detail responses)
+    public static TaskResponse fromWithSubtasks(Task task) {
+        List<TaskResponse> subtaskResponses = task.getSubtasks().stream()
+                .filter(s -> !s.isDeleted())
+                .map(TaskResponse::from)
+                .collect(Collectors.toList());
+
+        return builder()
+                .id(task.getId())
+                .userId(task.getUserId())
+                .parentTaskId(task.getParentTask() != null ? task.getParentTask().getId() : null)
+                .linkedEventId(task.getLinkedEventId())
+                .title(task.getTitle())
+                .description(task.getDescription())
+                .status(task.getStatus())
+                .priority(task.getPriority())
+                .dueDate(task.getDueDate())
+                .dueTime(task.getDueTime())
+                .reminderAt(task.getReminderAt())
+                .estimatedMinutes(task.getEstimatedMinutes())
+                .actualMinutes(task.getActualMinutes())
+                .completedAt(task.getCompletedAt())
+                .position(task.getPosition())
+                .deleted(task.isDeleted())
+                .deletedAt(task.getDeletedAt())
+                .version(task.getVersion())
+                .syncStatus(task.getSyncStatus())
+                .subtasks(subtaskResponses)
+                .createdAt(task.getCreatedAt())
+                .updatedAt(task.getUpdatedAt())
+                .build();
+    }
+}
