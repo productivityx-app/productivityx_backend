@@ -104,7 +104,7 @@ public class UserPreferences {
 
     @Column(name = "ai_model", nullable = false, length = 50)
     @Builder.Default
-    private String aiModel = "gemini-2.0-flash";
+    private String aiModel = "gemini-3.5-flash";
 
     // Display
     @Column(name = "compact_mode", nullable = false)

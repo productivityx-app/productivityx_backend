@@ -18,16 +18,9 @@ import java.io.InputStreamReader;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Low-level Gemini API client. Handles streaming (SSE) and blocking completions.
- *
- * <p>Uses the Spring-managed {@link ObjectMapper} (from {@code JacksonConfig}) instead
- * of creating a new instance — this ensures consistent date/time formatting and
- * unknown-property handling across the entire application.
- */
 @Component
 @Slf4j
-public class GeminiClient {
+public class GeminiClient implements AiModelProvider {
 
     private static final String BASE_URL  = "https://generativelanguage.googleapis.com/v1beta/models/";
     private static final MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
@@ -38,9 +31,6 @@ public class GeminiClient {
     @Value("${app.gemini.api-key}")
     private String apiKey;
 
-    @Value("${app.gemini.model:gemini-2.0-flash}")
-    private String defaultModel;
-
     public GeminiClient(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
         this.httpClient = new OkHttpClient.Builder()
@@ -50,14 +40,10 @@ public class GeminiClient {
                 .build();
     }
 
-    /**
-     * Streams a chat response token-by-token via SSE.
-     * Returns the full assembled response string once the stream completes.
-     */
+    @Override
     public String streamChat(String model, String systemPrompt,
                              List<GeminiMessage> history, String userMessage,
                              SseEmitter emitter) {
-
         String url  = BASE_URL + model + ":streamGenerateContent?alt=sse&key=" + apiKey;
         String body = buildRequestBody(systemPrompt, history, userMessage);
 
@@ -111,9 +97,7 @@ public class GeminiClient {
         return fullResponse.toString();
     }
 
-    /**
-     * Blocking single-turn completion — used for auto-generating conversation titles.
-     */
+    @Override
     public String completeChat(String model, String prompt) {
         String url  = BASE_URL + model + ":generateContent?key=" + apiKey;
         String body = buildRequestBody(null, List.of(), prompt);
@@ -139,25 +123,50 @@ public class GeminiClient {
         }
     }
 
+    @Override
+    public String getName() {
+        return "Google Gemini";
+    }
+
+    @Override
+    public List<String> getSupportedModels() {
+        return List.of(
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-001",
+                "gemini-2.0-flash-lite",
+                "gemini-2.0-flash-lite-001",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-2.5-pro",
+                "gemini-3-flash-preview",
+                "gemini-3-pro-preview",
+                "gemini-3.1-flash-lite",
+                "gemini-3.1-flash-lite-preview",
+                "gemini-3.1-pro-preview",
+                "gemini-3.5-flash",
+                "gemini-flash-latest",
+                "gemini-flash-lite-latest",
+                "gemini-pro-latest"
+        );
+    }
+
     private String buildRequestBody(String systemPrompt,
                                     List<GeminiMessage> history,
                                     String userMessage) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
 
-            // System instruction — Gemini supports this as a top-level field
             if (systemPrompt != null && !systemPrompt.isBlank()) {
                 ObjectNode systemInstruction = root.putObject("system_instruction");
                 ArrayNode  sysParts          = systemInstruction.putArray("parts");
                 sysParts.addObject().put("text", systemPrompt);
             }
 
-            // Conversation history + current user message
             ArrayNode contents = root.putArray("contents");
 
             for (GeminiMessage msg : history) {
                 ObjectNode turn  = contents.addObject();
-                turn.put("role", msg.role()); // "user" or "model"
+                turn.put("role", msg.role());
                 ArrayNode parts  = turn.putArray("parts");
                 parts.addObject().put("text", msg.content());
             }
@@ -167,7 +176,6 @@ public class GeminiClient {
             ArrayNode userParts  = userTurn.putArray("parts");
             userParts.addObject().put("text", userMessage);
 
-            // Generation config
             ObjectNode generationConfig = root.putObject("generationConfig");
             generationConfig.put("temperature", 0.7);
             generationConfig.put("maxOutputTokens", 2048);

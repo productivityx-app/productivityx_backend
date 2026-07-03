@@ -6,7 +6,9 @@ import com.oussama_chatri.productivityx.core.exception.AppException;
 import com.oussama_chatri.productivityx.core.exception.ErrorCode;
 import com.oussama_chatri.productivityx.core.util.PageableUtils;
 import com.oussama_chatri.productivityx.core.util.SecurityUtils;
+import com.oussama_chatri.productivityx.features.ai.client.AiModelProvider;
 import com.oussama_chatri.productivityx.features.ai.client.GeminiClient;
+import com.oussama_chatri.productivityx.features.ai.client.ModelRegistry;
 import com.oussama_chatri.productivityx.features.ai.dto.response.AiContext;
 import com.oussama_chatri.productivityx.features.ai.dto.request.ChatRequest;
 import com.oussama_chatri.productivityx.features.ai.dto.response.ConversationResponse;
@@ -43,10 +45,10 @@ public class AiServiceImpl implements AiService {
     private final UserPreferencesRepository preferencesRepository;
     private final SecurityUtils             securityUtils;
     private final PageableUtils             pageableUtils;
-    private final GeminiClient              geminiClient;
+    private final ModelRegistry             modelRegistry;
     private final AiContextBuilder          contextBuilder;
 
-    @Value("${app.gemini.model:gemini-2.0-flash}")
+    @Value("${app.gemini.model:gemini-3.5-flash}")
     private String defaultModel;
 
     @Override
@@ -103,32 +105,31 @@ public class AiServiceImpl implements AiService {
                     .findByIdAndUserIdWithMessages(conversationId, userId)
                     .orElseThrow(() -> AppException.notFound(ErrorCode.RES_CONVERSATION_NOT_FOUND));
 
-            String model        = resolveModel(userId);
+            String modelName   = resolveModel(userId);
             String systemPrompt = buildSystemPrompt(userId);
 
+            AiModelProvider provider = modelRegistry.resolveProvider(modelName);
             List<GeminiClient.GeminiMessage> history = buildHistory(conversation);
 
-            Message userMsg = messageRepository.save(Message.builder()
+            messageRepository.save(Message.builder()
                     .conversation(conversation)
                     .role(MessageRole.USER)
                     .content(userMessage)
                     .build());
-            log.debug("User message persisted id={}", userMsg.getId());
 
-            String fullResponse = geminiClient.streamChat(model, systemPrompt, history,
+            String fullResponse = provider.streamChat(modelName, systemPrompt, history,
                     userMessage, emitter);
 
             String actionBlock = extractActionBlock(fullResponse);
-            Message assistantMsg = messageRepository.save(Message.builder()
+            messageRepository.save(Message.builder()
                     .conversation(conversation)
                     .role(MessageRole.ASSISTANT)
                     .content(fullResponse)
                     .actionBlock(actionBlock)
                     .build());
-            log.debug("Assistant message persisted id={}", assistantMsg.getId());
 
             if (conversation.getTitle() == null && !userMessage.isBlank()) {
-                generateAndSaveTitle(conversation, userMessage, model);
+                generateAndSaveTitle(conversation, userMessage, modelName, provider);
             }
 
             conversationRepository.save(conversation);
@@ -232,7 +233,8 @@ public class AiServiceImpl implements AiService {
         }
     }
 
-    private void generateAndSaveTitle(Conversation conversation, String firstMessage, String model) {
+    private void generateAndSaveTitle(Conversation conversation, String firstMessage,
+                                       String modelName, AiModelProvider provider) {
         try {
             String prompt = """
                     Generate a short, descriptive title (max 6 words) for an AI conversation
@@ -242,7 +244,7 @@ public class AiServiceImpl implements AiService {
                     User message: %s
                     """.formatted(firstMessage);
 
-            String title = geminiClient.completeChat(model, prompt);
+            String title = provider.completeChat(modelName, prompt);
             if (title != null && !title.isBlank()) {
                 conversation.setTitle(title.trim());
                 conversationRepository.save(conversation);

@@ -2,6 +2,7 @@ package com.oussama_chatri.productivityx.features.ai.controller;
 
 import com.oussama_chatri.productivityx.core.dto.ApiResponse;
 import com.oussama_chatri.productivityx.core.dto.PagedResponse;
+import com.oussama_chatri.productivityx.features.ai.client.ModelRegistry;
 import com.oussama_chatri.productivityx.features.ai.dto.request.ChatRequest;
 import com.oussama_chatri.productivityx.features.ai.dto.response.ConversationResponse;
 import com.oussama_chatri.productivityx.features.ai.service.AiService;
@@ -14,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -23,6 +25,13 @@ import java.util.UUID;
 public class AiController {
 
     private final AiService aiService;
+    private final ModelRegistry modelRegistry;
+
+    @GetMapping("/models")
+    @Operation(summary = "List all supported AI models")
+    public ResponseEntity<ApiResponse<List<ModelRegistry.ModelInfo>>> listModels() {
+        return ResponseEntity.ok(ApiResponse.ok(modelRegistry.getAvailableModels()));
+    }
 
     @GetMapping("/conversations")
     @Operation(summary = "List all conversations for the current user — newest first, archived excluded")
@@ -53,12 +62,6 @@ public class AiController {
         return ResponseEntity.ok(ApiResponse.message("Conversation archived."));
     }
 
-    /**
-     * SSE streaming endpoint.
-     * The client connects with Accept: text/event-stream.
-     * Each SSE event carries a token. The stream ends with a "done" event containing "[DONE]".
-     * The full response is persisted server-side after streaming completes.
-     */
     @PostMapping(
             value = "/conversations/{id}/messages",
             produces = MediaType.TEXT_EVENT_STREAM_VALUE
