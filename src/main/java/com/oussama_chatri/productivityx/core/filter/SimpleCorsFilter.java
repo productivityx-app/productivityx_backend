@@ -13,8 +13,8 @@ public class SimpleCorsFilter implements Filter {
     private final String allowedOrigins;
 
     private static final List<String> ALLOWED_METHODS = List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS");
-    private static final List<String> ALLOWED_HEADERS = List.of("Authorization", "Content-Type", "Accept", "Idempotency-Key", "X-Request-ID");
-
+    private static final List<String> ALLOWED_HEADERS = List.of(
+            "Authorization", "Content-Type", "Accept", "Idempotency-Key", "X-Request-ID", "X-Device-Id");
     public SimpleCorsFilter(String allowedOrigins) {
         this.allowedOrigins = allowedOrigins;
     }
